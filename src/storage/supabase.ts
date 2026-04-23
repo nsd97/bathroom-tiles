@@ -326,20 +326,28 @@ export interface VersionSnapshots {
 /**
  * Insert a versions row carrying JSON snapshots of surfaces / painted cells /
  * settings, and return the new row mapped to `VersionRow`.
+ *
+ * If `id` is omitted the DB default (`gen_random_uuid()`) generates the
+ * primary key. If `id` is supplied, that value is used — callers seed
+ * `pendingKeys.add("version:<id>")` BEFORE awaiting to suppress the realtime
+ * echo of their own insert. Mirrors the pattern `createTile` uses.
  */
 export async function saveVersion(
   client: SupabaseClient,
   label: string,
   snapshots: VersionSnapshots,
+  id?: string,
 ): Promise<VersionRow> {
+  const payload: Record<string, unknown> = {
+    label,
+    surfaces_snapshot: snapshots.surfaces,
+    painted_cells_snapshot: snapshots.paintedCells,
+    settings_snapshot: snapshots.settings,
+  };
+  if (id !== undefined) payload['id'] = id;
   const { data, error } = await client
     .from('versions')
-    .insert({
-      label,
-      surfaces_snapshot: snapshots.surfaces,
-      painted_cells_snapshot: snapshots.paintedCells,
-      settings_snapshot: snapshots.settings,
-    })
+    .insert(payload)
     .select()
     .single();
   if (error) throw new Error(`saveVersion failed: ${error.message}`);

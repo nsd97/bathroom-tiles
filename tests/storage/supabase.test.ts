@@ -485,6 +485,43 @@ describe('saveVersion', () => {
     });
   });
 
+  it('forwards an explicit id into the insert payload (echo-suppression pattern)', async () => {
+    // Callers that seed `pendingKeys.add("version:<id>")` BEFORE awaiting must
+    // be able to pass that same id through to the insert. Mirrors the pattern
+    // covered for createTile.
+    const single = vi.fn().mockResolvedValue({
+      data: {
+        id: 'client-uuid',
+        label: 'seeded',
+        created_at: '2026-04-23T00:00:00Z',
+        surfaces_snapshot: [],
+        painted_cells_snapshot: {},
+        settings_snapshot: {},
+        schema_version: 1,
+        created_by: null,
+      },
+      error: null,
+    });
+    const select = vi.fn(() => ({ single }));
+    const insert = vi.fn(() => ({ select }));
+    const client = { from: () => ({ insert }) } as any;
+
+    const row = await saveVersion(
+      client,
+      'seeded',
+      { surfaces: [], paintedCells: {}, settings: {} },
+      'client-uuid',
+    );
+    expect(insert).toHaveBeenCalledWith({
+      id: 'client-uuid',
+      label: 'seeded',
+      surfaces_snapshot: [],
+      painted_cells_snapshot: {},
+      settings_snapshot: {},
+    });
+    expect(row.id).toBe('client-uuid');
+  });
+
   it('throws a descriptive error on failure', async () => {
     const single = vi.fn().mockResolvedValue({ data: null, error: { message: 'save fail' } });
     const select = vi.fn(() => ({ single }));

@@ -8,8 +8,10 @@ import { supabase } from './auth/client';
 import { gateStateFor } from './auth/gate';
 import { mountLogin } from './auth/login';
 import { initialState } from './core/state';
-import type { State, Surface } from './core/state';
+import type { State, Surface, Version } from './core/state';
 import type { Tile } from './core/tile';
+import { buildSnapshot, restoreIntoState } from './core/version';
+import type { Snapshot } from './core/version';
 import {
   fetchAll,
   subscribeAll,
@@ -21,6 +23,9 @@ import {
   setSurfaceTile,
   updateSettings,
   updateSurfaceDims,
+  saveVersion,
+  deleteVersion,
+  restoreVersion,
 } from './storage/supabase';
 import type {
   Change,
@@ -28,6 +33,7 @@ import type {
   ProjectSettingsDbRow,
   SurfaceDbRow,
   TileDbRow,
+  VersionDbRow,
 } from './storage/supabase';
 import { loadUIPrefs, persistUIPrefs, applyUIPrefs } from './storage/local';
 import { mountLayout } from './ui/layout';
@@ -39,6 +45,7 @@ import type { CountsRefs } from './ui/counts';
 import { renderCanvas, wireCanvasPainting } from './ui/surface';
 import type { SurfaceCallbacks } from './ui/surface';
 import { renderTileLibrary, renderNewTileForm } from './ui/tile-library';
+import { renderVersions, renderSaveForm } from './ui/versions';
 
 async function boot(): Promise<void> {
   const root = document.getElementById('app');
@@ -46,6 +53,7 @@ async function boot(): Promise<void> {
 
   const { data: { session } } = await supabase.auth.getSession();
   let state = gateStateFor(session);
+  let userId: string | null = session?.user?.id ?? null;
 
   function render(): void {
     if (state === 'signed-out') {
@@ -53,12 +61,13 @@ async function boot(): Promise<void> {
     } else if (state === 'not-allowed') {
       root!.innerHTML = '<div class="denied">Access denied.</div>';
     } else if (state === 'ready') {
-      void mountApp(root!);
+      void mountApp(root!, userId);
     }
   }
 
   const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, newSession) => {
     state = gateStateFor(newSession);
+    userId = newSession?.user?.id ?? null;
     render();
   });
 
@@ -71,7 +80,7 @@ async function boot(): Promise<void> {
   render();
 }
 
-async function mountApp(root: HTMLElement): Promise<void> {
+async function mountApp(root: HTMLElement, currentUserId: string | null): Promise<void> {
   // Clear any residual login/denied screen before mounting layout.
   root.innerHTML = '';
   const refs = mountLayout(root);
@@ -92,7 +101,9 @@ async function mountApp(root: HTMLElement): Promise<void> {
   state.ceilFt = loaded.settings.ceilFt;
   state.palette = loaded.settings.palette;
   state.selectedColor = loaded.settings.selectedColor;
-  // loaded.versions is ignored here — Phase 8 surfaces the list UI.
+  // `VersionRow` and `Version` have identical shapes; the projection is a
+  // structural identity and avoids a hard layering dep from core → storage.
+  state.versions = loaded.versions.map((v) => ({ ...v }));
 
   // UI-local prefs (view mode, orbit) stay in localStorage; the rest is server-sourced.
   const ui = loadUIPrefs();
@@ -236,6 +247,205 @@ async function mountApp(root: HTMLElement): Promise<void> {
       },
     });
   };
+
+  // --- Versions panel ---------------------------------------------------
+  // Single entry point for refreshing the panel (after hydration, after
+  // mutation, after realtime echo). Ordering is already newest-first because
+  // fetchAll runs `.order('created_at', { ascending: false })`.
+  const doRenderVersions = (): void => {
+    renderVersions(refs.versionsEl, state.versions, {
+      currentUserId,
+      onSaveRequested: () => {
+        renderSaveForm(refs.versionsEl, {
+          onCancel: () => doRenderVersions(),
+          onSave: (label) => onSaveVersion(label),
+        });
+      },
+      onLoad: (version) => onLoadVersion(version),
+      onDelete: (version) => onDeleteVersion(version),
+    });
+  };
+
+  /**
+   * Insert a new versions row. Seeds a pending key for echo suppression BEFORE
+   * awaiting the insert, and optimistically prepends the row locally so the
+   * panel updates without waiting for the realtime echo. On failure, the
+   * optimistic row is rolled back and the key cleared.
+   */
+  function onSaveVersion(label: string): void {
+    const id = crypto.randomUUID();
+    const key = `version:${id}`;
+    pendingKeys.add(key);
+    const snapshot: Snapshot = buildSnapshot(state);
+    // Optimistic row — createdAt is an approximation until the DB returns the
+    // real timestamp, but the echo is suppressed so this value persists.
+    // Using the local ISO string keeps timeAgo() displaying "just now".
+    const optimistic: Version = {
+      id,
+      label,
+      createdAt: new Date().toISOString(),
+      createdBy: currentUserId,
+      schemaVersion: 1,
+      surfacesSnapshot: snapshot.surfaces,
+      paintedCellsSnapshot: snapshot.paintedCells,
+      settingsSnapshot: snapshot.settings,
+    };
+    state.versions = [optimistic, ...state.versions];
+    doRenderVersions();
+    saveVersion(
+      supabase,
+      label,
+      {
+        surfaces: snapshot.surfaces,
+        paintedCells: snapshot.paintedCells,
+        settings: snapshot.settings,
+      },
+      id,
+    ).catch((e: unknown) => {
+      console.warn('[saveVersion]', e);
+      pendingKeys.delete(key);
+      state.versions = state.versions.filter((v) => v.id !== id);
+      doRenderVersions();
+    });
+  }
+
+  /**
+   * Restore the selected version. Strategy:
+   *   1. Dry-run `restoreIntoState` on a shallow-cloned state to validate that
+   *      every snapshot surface's tileId still exists in the library. If it
+   *      throws, surface the error inline on the row and bail.
+   *   2. Push the snapshot into the DB via `restoreVersion` (surfaces upsert →
+   *      settings upsert → painted_cells wipe → painted_cells upsert).
+   *   3. Re-hydrate via `fetchAll` and blow away local state in one shot, then
+   *      full re-render. Rather than seed N echo-suppression keys for every
+   *      painted cell (idempotent anyway — applyPaintedCellChange sets the
+   *      same value), we rely on the realtime dedupe: when echoes arrive,
+   *      handlers update state idempotently and the DOM just stays put.
+   */
+  function onLoadVersion(version: Version): void {
+    const snapshot = snapshotFromVersion(version);
+    if (!snapshot) {
+      showVersionError(version.id, 'Version snapshot is malformed.');
+      return;
+    }
+    // Dry-run validation against the live tile library.
+    try {
+      const probe = cloneStateForProbe(state);
+      restoreIntoState(probe, snapshot);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      showVersionError(version.id, msg);
+      return;
+    }
+    // Apply: push the snapshot to Supabase, then re-fetch and render.
+    restoreVersion(supabase, {
+      surfaces: snapshot.surfaces.map((s) => ({
+        id: s.id,
+        group: s.group,
+        name: s.name,
+        width_in: s.widthIn,
+        height_in: s.heightIn,
+        note: s.note ?? null,
+        height_locked: !!s.heightLocked,
+        tile_id: s.tileId,
+      })),
+      paintedCells: Object.entries(snapshot.paintedCells).flatMap(
+        ([surfaceId, cells]) =>
+          Object.entries(cells).map(([cellKey, color]) => ({
+            surface_id: surfaceId,
+            cell_key: cellKey,
+            color,
+          })),
+      ),
+      settings: {
+        id: 1,
+        ceil_ft: snapshot.settings.ceilFt,
+        palette: snapshot.settings.palette,
+        selected_color: snapshot.settings.selectedColor,
+      },
+    })
+      .then(() => fetchAll(supabase))
+      .then((reloaded) => {
+        state.tileLibrary = reloaded.tileLibrary;
+        state.surfaces = reloaded.surfaces;
+        state.tiles = reloaded.paintedCells;
+        state.ceilFt = reloaded.settings.ceilFt;
+        state.palette = reloaded.settings.palette;
+        state.selectedColor = reloaded.settings.selectedColor;
+        state.versions = reloaded.versions.map((v) => ({ ...v }));
+        refs.ceilInput.value = String(state.ceilFt);
+        // focusedSurfaceId may now point at a deleted surface — clear it.
+        focusedSurfaceId = null;
+        surfaceCb.focusedSurfaceId = null;
+        rerenderAll();
+      })
+      .catch((e: unknown) => {
+        console.warn('[restoreVersion]', e);
+        const msg = e instanceof Error ? e.message : String(e);
+        showVersionError(version.id, msg);
+      });
+  }
+
+  /** Delete a version row (optimistic local remove with rollback on failure). */
+  function onDeleteVersion(version: Version): void {
+    const key = `version:${version.id}`;
+    pendingKeys.add(key);
+    const prev = state.versions;
+    state.versions = state.versions.filter((v) => v.id !== version.id);
+    doRenderVersions();
+    deleteVersion(supabase, version.id).catch((e: unknown) => {
+      console.warn('[deleteVersion]', e);
+      pendingKeys.delete(key);
+      state.versions = prev;
+      doRenderVersions();
+    });
+  }
+
+  /**
+   * Narrow the raw JSONB snapshot blobs back into a `Snapshot`. We trust
+   * schema_version=1 rows and validate only the structural presence of the
+   * three expected fields. Returns null if something looks off.
+   */
+  function snapshotFromVersion(v: Version): Snapshot | null {
+    const surfaces = v.surfacesSnapshot;
+    const cells = v.paintedCellsSnapshot;
+    const settings = v.settingsSnapshot;
+    if (!Array.isArray(surfaces)) return null;
+    if (typeof cells !== 'object' || cells === null) return null;
+    if (typeof settings !== 'object' || settings === null) return null;
+    return {
+      surfaces: surfaces as Snapshot['surfaces'],
+      paintedCells: cells as Snapshot['paintedCells'],
+      settings: settings as Snapshot['settings'],
+    };
+  }
+
+  /** Shallow clone sufficient for a `restoreIntoState` dry-run. */
+  function cloneStateForProbe(src: State): State {
+    return {
+      ...src,
+      surfaces: [...src.surfaces],
+      tiles: { ...src.tiles },
+      palette: [...src.palette],
+      tileLibrary: [...src.tileLibrary],
+      versions: [...src.versions],
+    };
+  }
+
+  /** Surface a short inline error under a version row (replaces any prior). */
+  function showVersionError(versionId: string, message: string): void {
+    const row = refs.versionsEl.querySelector<HTMLElement>(
+      `.version-row[data-version-id="${versionId}"]`,
+    );
+    if (!row) return;
+    row.querySelector('.version-error')?.remove();
+    const err = document.createElement('div');
+    err.className = 'version-error';
+    err.textContent = message.startsWith('Version references missing tile')
+      ? 'Version references a deleted tile — cannot load.'
+      : message;
+    row.appendChild(err);
+  }
 
   /** Update the focused surface, rerender the library, and toggle `.focused`. */
   function focusSurface(surfaceId: string): void {
@@ -381,6 +591,7 @@ async function mountApp(root: HTMLElement): Promise<void> {
   const rerenderAll = (): void => {
     doRenderSwatches();
     doRenderTileLibrary();
+    doRenderVersions();
     rerenderCanvas();
     rerenderCounts();
   };
@@ -404,8 +615,9 @@ async function mountApp(root: HTMLElement): Promise<void> {
       },
       onPaintedCell: (c) => applyPaintedCellChange(state, c, refs.canvas2d, rerenderCounts),
       onSettings: (c) => applySettingsChange(state, c, refs, doRenderSwatches, () => rerenderCanvas()),
-      onVersion: () => {
-        // Phase 8 will surface the versions list. Ignore for now.
+      onVersion: (c) => {
+        applyVersionChange(state, c);
+        doRenderVersions();
       },
       onStatus: (status, err) => {
         console.info('[realtime]', status, err ?? '');
@@ -567,6 +779,35 @@ function applyPaintedCellChange(
     }
   }
   rerenderCounts();
+}
+
+function applyVersionChange(state: State, change: Change<VersionDbRow>): void {
+  const mapRow = (r: VersionDbRow): Version => ({
+    id: r.id,
+    label: r.label,
+    createdAt: r.created_at,
+    createdBy: r.created_by ?? null,
+    schemaVersion: r.schema_version,
+    surfacesSnapshot: r.surfaces_snapshot,
+    paintedCellsSnapshot: r.painted_cells_snapshot,
+    settingsSnapshot: r.settings_snapshot,
+  });
+  if (change.kind === 'delete') {
+    const id = change.row.id ?? change.oldRow?.id;
+    if (!id) return;
+    state.versions = state.versions.filter((v) => v.id !== id);
+    return;
+  }
+  const incoming = mapRow(change.row);
+  const idx = state.versions.findIndex((v) => v.id === incoming.id);
+  if (idx === -1) {
+    // Newest-first ordering matches fetchAll's .order('created_at', desc).
+    state.versions = [incoming, ...state.versions];
+  } else {
+    const copy = [...state.versions];
+    copy[idx] = incoming;
+    state.versions = copy;
+  }
 }
 
 function applySettingsChange(
