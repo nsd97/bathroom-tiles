@@ -371,6 +371,97 @@
     );
     pointer-events: none;
   }
+
+  .view-toggle {
+    display: inline-flex;
+    gap: 2px;
+    background: #f5f5f7;
+    padding: 2px;
+    border-radius: 8px;
+    margin-bottom: 28px;
+  }
+  .view-toggle button {
+    padding: 6px 14px;
+    border: none;
+    background: transparent;
+    font: inherit;
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--ink-muted);
+    border-radius: 6px;
+    cursor: pointer;
+  }
+  .view-toggle button.active {
+    background: #fff;
+    color: var(--ink);
+    box-shadow: 0 1px 2px rgba(0,0,0,.06);
+  }
+
+  .scene-3d {
+    position: relative;
+    perspective: 2400px;
+    perspective-origin: 50% 40%;
+    height: 640px;
+    background: linear-gradient(180deg, #f5f5f7 0%, #eaeaef 100%);
+    border-radius: 12px;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    overflow: hidden;
+    cursor: grab;
+    user-select: none;
+  }
+  .scene-3d:active { cursor: grabbing; }
+  .scene-3d .world {
+    position: relative;
+    transform-style: preserve-3d;
+    transition: transform 60ms linear;
+    will-change: transform;
+  }
+  .scene-3d .face {
+    position: absolute;
+    top: 0;
+    left: 0;
+    transform-style: preserve-3d;
+    backface-visibility: hidden;
+    box-shadow: 0 0 0 1px rgba(0,0,0,0.04) inset;
+  }
+  .scene-3d .grid-3d {
+    display: grid;
+    background: var(--grout);
+    padding: 0.5px;
+    gap: 0.5px;
+  }
+  .scene-3d .tile-3d {
+    background: var(--tile-empty);
+  }
+  .scene-3d .hint {
+    position: absolute;
+    bottom: 14px;
+    right: 16px;
+    font-size: 11px;
+    color: var(--ink-muted);
+    font-family: "SF Mono", Menlo, monospace;
+    pointer-events: none;
+    background: rgba(255,255,255,0.7);
+    padding: 4px 8px;
+    border-radius: 6px;
+    backdrop-filter: blur(4px);
+  }
+  .scene-3d .orbit-reset {
+    position: absolute;
+    top: 14px;
+    right: 16px;
+    font-size: 11px;
+    padding: 6px 12px;
+    border: 1px solid var(--hairline);
+    background: rgba(255,255,255,0.9);
+    border-radius: 6px;
+    cursor: pointer;
+    color: var(--ink);
+    font-family: inherit;
+  }
+  .scene-3d .orbit-reset:hover { background: #fff; }
 </style>
 </head>
 <body>
@@ -445,7 +536,13 @@
     <p>Drawn at real dimensions. Edge tiles render at their true cut width with a diagonal mark — every cut still comes from a whole tile of stock, so it counts as one for the order. Click or drag to paint. Hold <code>shift</code> to eyedrop, <code>option</code> to erase.</p>
   </div>
 
+  <div class="view-toggle" id="view-toggle">
+    <button data-view="2d" class="active">2D paint</button>
+    <button data-view="3d">3D preview</button>
+  </div>
+
   <div id="canvas"></div>
+  <div id="canvas-3d" hidden></div>
 </main>
 
 <script>
@@ -484,6 +581,8 @@
     tool: 'paint',
     surfaces: [],
     tiles: {}, // { surfaceId: Map<"r,c", color> } — coordinate keys survive grid resizes
+    viewMode: '2d', // '2d' | '3d'
+    orbit: { rotX: -18, rotY: -28 },
   };
 
   // Parse ft-in inputs: "14'2\"", "14'2", "14' 2\"", "170\"", "170in", "170", "14.2ft"
@@ -558,6 +657,8 @@
         selectedColor: state.selectedColor,
         surfaces: state.surfaces.map(s => ({ id: s.id, widthIn: s.widthIn, heightIn: s.heightIn })),
         tiles: tilesOut,
+        viewMode: state.viewMode,
+        orbit: state.orbit,
       }));
     } catch (e) {}
   }
@@ -574,6 +675,8 @@
       if (typeof saved.ceilFt === 'number') state.ceilFt = saved.ceilFt;
       if (Array.isArray(saved.palette) && saved.palette.length) state.palette = saved.palette;
       if (saved.selectedColor) state.selectedColor = saved.selectedColor;
+      if (saved.viewMode === '2d' || saved.viewMode === '3d') state.viewMode = saved.viewMode;
+      if (saved.orbit && typeof saved.orbit.rotX === 'number' && typeof saved.orbit.rotY === 'number') state.orbit = saved.orbit;
       state.surfaces = defaultSurfaces(state.ceilFt);
       if (Array.isArray(saved.surfaces)) {
         const ov = Object.fromEntries(saved.surfaces.map(s => [s.id, s]));
@@ -913,6 +1016,7 @@
     for (const s of state.surfaces) if (s.heightLocked) s.heightIn = ceilIn;
     renderCanvas();
     renderCounts();
+    if (state.viewMode === '3d') render3D();
     persist();
   });
 
@@ -986,9 +1090,171 @@
     persist();
   });
 
+  // --- 3D preview ---------------------------------------------------------
+
+  const PX_PER_INCH_3D = 3;
+  const TILE_PX_3D = TILE_INCH * PX_PER_INCH_3D;
+  const canvas3dEl = $('#canvas-3d');
+  const canvas2dEl = canvas;
+
+  function getSurface(id) {
+    return state.surfaces.find(s => s.id === id);
+  }
+
+  function build3DFace(s, transform, originIn = { x: 0, y: 0 }) {
+    const face = document.createElement('div');
+    face.className = 'face';
+    face.dataset.surfaceId = s.id;
+    const wPx = s.widthIn * PX_PER_INCH_3D;
+    const hPx = s.heightIn * PX_PER_INCH_3D;
+    face.style.width = wPx + 'px';
+    face.style.height = hPx + 'px';
+    face.style.transform = transform;
+
+    const grid = document.createElement('div');
+    grid.className = 'grid-3d';
+    grid.style.width = wPx + 'px';
+    grid.style.height = hPx + 'px';
+
+    const g = getGrid(s);
+    const colSizes3d = g.colSizes.map(v => (v / TILE_PX) * TILE_PX_3D);
+    const rowSizes3d = g.rowSizes.map(v => (v / TILE_PX) * TILE_PX_3D);
+    grid.style.gridTemplateColumns = colSizes3d.map(v => v.toFixed(2) + 'px').join(' ');
+    grid.style.gridTemplateRows = rowSizes3d.map(v => v.toFixed(2) + 'px').join(' ');
+
+    const tilesMap = state.tiles[s.id] || new Map();
+    for (let r = 0; r < g.rows; r++) {
+      for (let c = 0; c < g.cols; c++) {
+        const t = document.createElement('div');
+        t.className = 'tile-3d';
+        const color = tilesMap.get(cellKey(r, c));
+        if (color) t.style.background = color;
+        grid.appendChild(t);
+      }
+    }
+    face.appendChild(grid);
+    return face;
+  }
+
+  function applyOrbit(world, roomW, roomH, roomD) {
+    const { rotX, rotY } = state.orbit;
+    world.style.transform =
+      `rotateX(${rotX}deg) rotateY(${rotY}deg) translate3d(${-roomW / 2}px, ${-roomH / 2}px, ${-roomD / 2}px)`;
+  }
+
+  function render3D() {
+    canvas3dEl.innerHTML = '';
+
+    const main    = getSurface('main');
+    const shower  = getSurface('shower');
+    const ceiling = getSurface('ceiling');
+    const wallN   = getSurface('wallN');
+    const wallS   = getSurface('wallS');
+    const wallE   = getSurface('wallE');
+    const wallW   = getSurface('wallW');
+
+    // Room dimensions from the ceiling surface (authoritative for the 3D box).
+    const roomWin = ceiling.widthIn;
+    const roomDin = ceiling.heightIn;
+    const roomHin = state.ceilFt * 12;
+    const roomW = roomWin * PX_PER_INCH_3D;
+    const roomD = roomDin * PX_PER_INCH_3D;
+    const roomH = roomHin * PX_PER_INCH_3D;
+
+    const scene = document.createElement('div');
+    scene.className = 'scene-3d';
+
+    const world = document.createElement('div');
+    world.className = 'world';
+    world.style.width = roomW + 'px';
+    world.style.height = roomH + 'px';
+    scene.appendChild(world);
+
+    // Ceiling — at Y=0, painted face down.
+    world.appendChild(build3DFace(ceiling,
+      `translate3d(0px, 0px, ${roomD}px) rotateX(-90deg)`));
+
+    // Floor — shower on left, main on right; combined = roomW × roomD at Y=roomH, facing up.
+    const showerWpx = shower.widthIn * PX_PER_INCH_3D;
+    world.appendChild(build3DFace(shower,
+      `translate3d(0px, ${roomH}px, 0px) rotateX(90deg)`));
+    world.appendChild(build3DFace(main,
+      `translate3d(${showerWpx}px, ${roomH}px, 0px) rotateX(90deg)`));
+
+    // Walls — painted face inward.
+    world.appendChild(build3DFace(wallN, `translate3d(0px, 0px, 0px)`));
+    world.appendChild(build3DFace(wallS, `translate3d(${roomW}px, 0px, ${roomD}px) rotateY(180deg)`));
+    world.appendChild(build3DFace(wallE, `translate3d(${roomW}px, 0px, 0px) rotateY(-90deg)`));
+    world.appendChild(build3DFace(wallW, `translate3d(0px, 0px, ${roomD}px) rotateY(90deg)`));
+
+    applyOrbit(world, roomW, roomH, roomD);
+
+    const hint = document.createElement('div');
+    hint.className = 'hint';
+    hint.textContent = 'drag to orbit';
+    scene.appendChild(hint);
+
+    const reset = document.createElement('button');
+    reset.className = 'orbit-reset';
+    reset.textContent = 'Reset view';
+    reset.addEventListener('click', () => {
+      state.orbit = { rotX: -18, rotY: -28 };
+      applyOrbit(world, roomW, roomH, roomD);
+      persist();
+    });
+    scene.appendChild(reset);
+
+    // Mouse orbit
+    let dragging = false;
+    let lastX = 0, lastY = 0;
+    scene.addEventListener('mousedown', (e) => {
+      if (e.target.closest('button')) return;
+      dragging = true;
+      lastX = e.clientX;
+      lastY = e.clientY;
+      e.preventDefault();
+    });
+    window.addEventListener('mousemove', (e) => {
+      if (!dragging) return;
+      const dx = e.clientX - lastX;
+      const dy = e.clientY - lastY;
+      lastX = e.clientX;
+      lastY = e.clientY;
+      state.orbit.rotY += dx * 0.5;
+      state.orbit.rotX = Math.max(-80, Math.min(10, state.orbit.rotX - dy * 0.4));
+      applyOrbit(world, roomW, roomH, roomD);
+    });
+    window.addEventListener('mouseup', () => {
+      if (dragging) { dragging = false; persist(); }
+    });
+
+    canvas3dEl.appendChild(scene);
+  }
+
+  function setViewMode(mode) {
+    state.viewMode = mode;
+    document.querySelectorAll('#view-toggle button').forEach((b) => {
+      b.classList.toggle('active', b.dataset.view === mode);
+    });
+    if (mode === '3d') {
+      canvas2dEl.hidden = true;
+      canvas3dEl.hidden = false;
+      render3D();
+    } else {
+      canvas3dEl.hidden = true;
+      canvas2dEl.hidden = false;
+    }
+    persist();
+  }
+
+  document.querySelectorAll('#view-toggle button').forEach((b) => {
+    b.addEventListener('click', () => setViewMode(b.dataset.view));
+  });
+
   renderSwatches();
   renderCanvas();
   renderCounts();
+  setViewMode(state.viewMode);
 })();
 </script>
 </body>
