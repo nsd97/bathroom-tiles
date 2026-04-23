@@ -35,6 +35,8 @@ describe('getGrid', () => {
     expect(g.fullRows).toBe(3);
     expect(g.hasRowCut).toBe(true);
     expect(g.hasColCut).toBe(false);
+    expect(g.rowSizes).toHaveLength(4);
+    expect(g.rowSizes[3]).toBeCloseTo((2 / TILE_INCH) * TILE_PX, 2);
   });
 
   it('adds both fractional row and col', () => {
@@ -43,12 +45,24 @@ describe('getGrid', () => {
     expect(g.rows).toBe(4);
     expect(g.hasColCut).toBe(true);
     expect(g.hasRowCut).toBe(true);
+    expect(g.colSizes).toHaveLength(5);
+    expect(g.colSizes[4]).toBeCloseTo((2 / TILE_INCH) * TILE_PX, 2);
+    expect(g.rowSizes).toHaveLength(4);
+    expect(g.rowSizes[3]).toBeCloseTo((2 / TILE_INCH) * TILE_PX, 2);
   });
 
   it('treats sub-epsilon remainder as no cut', () => {
     const g = getGrid({ widthIn: TILE_INCH * 4 + 0.001, heightIn: TILE_INCH * 3 });
     expect(g.hasColCut).toBe(false);
     expect(g.cols).toBe(4);
+  });
+
+  it('size arrays sum to the expected full-pixel extent', () => {
+    const g = getGrid(fracCol);
+    const sumCol = g.colSizes.reduce((a, b) => a + b, 0);
+    expect(sumCol).toBeCloseTo(((TILE_INCH * 4 + 2) / TILE_INCH) * TILE_PX, 1);
+    const sumRow = g.rowSizes.reduce((a, b) => a + b, 0);
+    expect(sumRow).toBeCloseTo(((TILE_INCH * 3) / TILE_INCH) * TILE_PX, 1);
   });
 });
 
@@ -68,6 +82,10 @@ describe('isCutCell', () => {
     for (let r = 0; r < g.rows; r++)
       for (let c = 0; c < g.cols; c++)
         expect(isCutCell(g, r, c)).toBe(false);
+  });
+  it('marks the bottom-right corner cut when both axes have cuts', () => {
+    const g = getGrid(fracBoth);
+    expect(isCutCell(g, g.rows - 1, g.cols - 1)).toBe(true);
   });
 });
 
