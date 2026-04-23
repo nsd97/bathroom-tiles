@@ -3,7 +3,7 @@ import { defaultSurfaces, initTiles } from '@/core/state';
 
 const STORAGE_KEY = 'tilePlanner.v2';
 
-interface SavedShape {
+export interface SavedShape {
   ceilFt?: number;
   palette?: string[];
   selectedColor?: string;
@@ -51,6 +51,7 @@ export function applySaved(state: State, saved: SavedShape): void {
   if (saved.orbit && typeof saved.orbit.rotX === 'number' && typeof saved.orbit.rotY === 'number') {
     state.orbit = saved.orbit;
   }
+  // Reset surfaces to defaults so heightLocked walls re-derive from current ceiling; saved widths/heights overlay below.
   state.surfaces = defaultSurfaces(state.ceilFt);
   if (Array.isArray(saved.surfaces)) {
     const ov = Object.fromEntries(saved.surfaces.map(s => [s.id, s]));
