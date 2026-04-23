@@ -65,6 +65,9 @@ export function mountLogin(root: HTMLElement, opts: { onSent: () => void }): voi
         return;
       }
       setStatus(status, `Check ${email}. Click the link to sign in.`, 'success');
+      input.disabled = false;
+      button.disabled = false;
+      button.textContent = 'Resend';
       opts.onSent();
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Something went wrong.';

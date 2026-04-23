@@ -1,3 +1,4 @@
+/* Login + access-denied (.auth-screen, .auth-card, .auth-status, .denied) */
 .auth-screen {
   position: fixed;
   inset: 0;

@@ -33,10 +33,16 @@ async function boot() {
     }
   }
 
-  supabase.auth.onAuthStateChange((_event, newSession) => {
+  const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, newSession) => {
     state = gateStateFor(newSession);
     render();
   });
+
+  if (import.meta.hot) {
+    import.meta.hot.dispose(() => {
+      subscription.unsubscribe();
+    });
+  }
 
   render();
 }
