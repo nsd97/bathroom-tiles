@@ -1,0 +1,65 @@
+  .scene-3d {
+    position: relative;
+    perspective: 2400px;
+    perspective-origin: 50% 40%;
+    height: 640px;
+    background: linear-gradient(180deg, #f5f5f7 0%, #eaeaef 100%);
+    border-radius: 12px;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    overflow: hidden;
+    cursor: grab;
+    user-select: none;
+  }
+  .scene-3d:active { cursor: grabbing; }
+  .scene-3d .world {
+    position: relative;
+    transform-style: preserve-3d;
+    transition: transform 60ms linear;
+    will-change: transform;
+  }
+  .scene-3d .face {
+    position: absolute;
+    top: 0;
+    left: 0;
+    transform-style: preserve-3d;
+    backface-visibility: hidden;
+    box-shadow: 0 0 0 1px rgba(0,0,0,0.04) inset;
+  }
+  .scene-3d .grid-3d {
+    display: grid;
+    background: var(--grout);
+    padding: 0.5px;
+    gap: 0.5px;
+  }
+  .scene-3d .tile-3d {
+    background: var(--tile-empty);
+  }
+  .scene-3d .hint {
+    position: absolute;
+    bottom: 14px;
+    right: 16px;
+    font-size: 11px;
+    color: var(--ink-muted);
+    font-family: "SF Mono", Menlo, monospace;
+    pointer-events: none;
+    background: rgba(255,255,255,0.7);
+    padding: 4px 8px;
+    border-radius: 6px;
+    backdrop-filter: blur(4px);
+  }
+  .scene-3d .orbit-reset {
+    position: absolute;
+    top: 14px;
+    right: 16px;
+    font-size: 11px;
+    padding: 6px 12px;
+    border: 1px solid var(--hairline);
+    background: rgba(255,255,255,0.9);
+    border-radius: 6px;
+    cursor: pointer;
+    color: var(--ink);
+    font-family: inherit;
+  }
+  .scene-3d .orbit-reset:hover { background: #fff; }
