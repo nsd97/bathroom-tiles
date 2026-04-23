@@ -46,6 +46,7 @@ import { renderCanvas, wireCanvasPainting } from './ui/surface';
 import type { SurfaceCallbacks } from './ui/surface';
 import { renderTileLibrary, renderNewTileForm } from './ui/tile-library';
 import { renderVersions, renderSaveForm } from './ui/versions';
+import { mountConnectionIndicator } from './ui/connection-indicator';
 
 async function boot(): Promise<void> {
   const root = document.getElementById('app');
@@ -596,6 +597,16 @@ async function mountApp(root: HTMLElement, currentUserId: string | null): Promis
     rerenderCounts();
   };
 
+  // Connection indicator (fixed-position pill) — mounted on document.body so
+  // it survives auth rerenders. Seeded with the current online state before
+  // realtime subscribes so initial offline is reflected immediately.
+  const indicator = mountConnectionIndicator(document.body);
+  indicator.setOnline(navigator.onLine);
+  const onOnline = (): void => indicator.setOnline(true);
+  const onOffline = (): void => indicator.setOnline(false);
+  window.addEventListener('online', onOnline);
+  window.addEventListener('offline', onOffline);
+
   // Realtime subscription. Echo-suppression handled inside the dispatcher
   // using `pendingKeys`; the handlers below only see non-echo events.
   const unsubscribeRealtime = subscribeAll(
@@ -621,6 +632,7 @@ async function mountApp(root: HTMLElement, currentUserId: string | null): Promis
       },
       onStatus: (status, err) => {
         console.info('[realtime]', status, err ?? '');
+        indicator.setRealtimeStatus(status);
       },
     },
     pendingKeys,
@@ -684,6 +696,9 @@ async function mountApp(root: HTMLElement, currentUserId: string | null): Promis
   if (import.meta.hot) {
     import.meta.hot.dispose(() => {
       unsubscribeRealtime();
+      window.removeEventListener('online', onOnline);
+      window.removeEventListener('offline', onOffline);
+      indicator.destroy();
     });
   }
 }
