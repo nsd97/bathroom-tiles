@@ -66,7 +66,7 @@ describe('fetchAll', () => {
     const result = await fetchAll(client);
 
     expect(result.tileLibrary).toEqual([
-      { id: 't1', shape: 'square', sizeIn: 3, label: 'Square 3"' },
+      { id: 't1', shape: 'square', sizeIn: 3, label: 'Square 3"', createdBy: null },
     ]);
     expect(result.surfaces).toHaveLength(1);
     expect(result.surfaces[0]!.tileId).toBe('t1');
@@ -115,6 +115,57 @@ describe('fetchAll', () => {
       },
     } as any;
     await expect(fetchAll(client)).rejects.toThrow(/boom/);
+  });
+
+  it('throws when project_settings has zero rows (migration drift)', async () => {
+    const client = mockReadClient({
+      tiles: [],
+      surfaces: [],
+      painted_cells: [],
+      project_settings: [],
+      versions: [],
+    });
+    await expect(fetchAll(client)).rejects.toThrow(/project_settings row missing/);
+  });
+
+  it('surfaces schema_version and created_by on versions rows', async () => {
+    const client = mockReadClient({
+      tiles: [],
+      surfaces: [],
+      painted_cells: [],
+      project_settings: [{ id: 1, ceil_ft: 9, palette: [], selected_color: '#000' }],
+      versions: [
+        {
+          id: 'v1',
+          label: 'snap',
+          created_at: '2026-04-23T00:00:00Z',
+          surfaces_snapshot: [],
+          painted_cells_snapshot: [],
+          settings_snapshot: {},
+          schema_version: 1,
+          created_by: 'user-uuid',
+        },
+      ],
+    });
+    const result = await fetchAll(client);
+    expect(result.versions).toHaveLength(1);
+    expect(result.versions[0]!.schemaVersion).toBe(1);
+    expect(result.versions[0]!.createdBy).toBe('user-uuid');
+  });
+
+  it('surfaces created_by on tiles rows (null when unset)', async () => {
+    const client = mockReadClient({
+      tiles: [
+        { id: 't1', shape: 'square', size_in: 3, label: 'Square 3"', created_by: null },
+      ],
+      surfaces: [],
+      painted_cells: [],
+      project_settings: [{ id: 1, ceil_ft: 9, palette: [], selected_color: '#000' }],
+      versions: [],
+    });
+    const result = await fetchAll(client);
+    expect(result.tileLibrary).toHaveLength(1);
+    expect(result.tileLibrary[0]!.createdBy).toBeNull();
   });
 });
 
@@ -367,6 +418,8 @@ describe('saveVersion', () => {
         surfaces_snapshot: [{ id: 'main' }],
         painted_cells_snapshot: { main: {} },
         settings_snapshot: { ceil_ft: 9 },
+        schema_version: 1,
+        created_by: 'user-uuid',
       },
       error: null,
     });
@@ -394,6 +447,8 @@ describe('saveVersion', () => {
       surfacesSnapshot: [{ id: 'main' }],
       paintedCellsSnapshot: { main: {} },
       settingsSnapshot: { ceil_ft: 9 },
+      schemaVersion: 1,
+      createdBy: 'user-uuid',
     });
   });
 
@@ -428,7 +483,7 @@ describe('deleteVersion', () => {
 });
 
 describe('restoreVersion', () => {
-  it('deletes all painted_cells, upserts surfaces, upserts settings, then upserts painted_cells', async () => {
+  it('upserts surfaces, upserts settings, deletes all painted_cells, then upserts painted_cells', async () => {
     const deleteNot = vi.fn().mockResolvedValue({ error: null });
     const del = vi.fn(() => ({ not: deleteNot }));
     const upsert = vi.fn().mockResolvedValue({ error: null });
@@ -454,18 +509,18 @@ describe('restoreVersion', () => {
 
     await restoreVersion(client, snapshot);
 
-    // Step 1: painted_cells delete
-    expect(fromTable).toHaveBeenNthCalledWith(1, 'painted_cells');
-    expect(del).toHaveBeenCalled();
-    expect(deleteNot).toHaveBeenCalledWith('surface_id', 'is', null);
-
-    // Step 2: surfaces upsert
-    expect(fromTable).toHaveBeenNthCalledWith(2, 'surfaces');
+    // Step 1: surfaces upsert
+    expect(fromTable).toHaveBeenNthCalledWith(1, 'surfaces');
     expect(upsert).toHaveBeenNthCalledWith(1, snapshot.surfaces);
 
-    // Step 3: project_settings upsert (id=1)
-    expect(fromTable).toHaveBeenNthCalledWith(3, 'project_settings');
+    // Step 2: project_settings upsert (id=1)
+    expect(fromTable).toHaveBeenNthCalledWith(2, 'project_settings');
     expect(upsert).toHaveBeenNthCalledWith(2, snapshot.settings);
+
+    // Step 3: painted_cells delete
+    expect(fromTable).toHaveBeenNthCalledWith(3, 'painted_cells');
+    expect(del).toHaveBeenCalled();
+    expect(deleteNot).toHaveBeenCalledWith('surface_id', 'is', null);
 
     // Step 4: painted_cells upsert
     expect(fromTable).toHaveBeenNthCalledWith(4, 'painted_cells');
@@ -485,15 +540,53 @@ describe('restoreVersion', () => {
     });
     // surfaces, settings -> 2 upserts. No 3rd for painted_cells.
     expect(upsert).toHaveBeenCalledTimes(2);
+    // painted_cells delete still runs (we always clear before re-populating)
+    expect(del).toHaveBeenCalledTimes(1);
   });
 
   it('throws a descriptive error when any step fails', async () => {
-    const deleteNot = vi.fn().mockResolvedValue({ error: { message: 'clear fail' } });
+    // Step 1 (surfaces upsert) now runs first; make it fail.
+    const upsert = vi.fn().mockResolvedValue({ error: { message: 'surf fail' } });
+    const deleteNot = vi.fn().mockResolvedValue({ error: null });
     const del = vi.fn(() => ({ not: deleteNot }));
-    const upsert = vi.fn().mockResolvedValue({ error: null });
     const client = { from: () => ({ delete: del, upsert }) } as any;
     await expect(
-      restoreVersion(client, { surfaces: [], paintedCells: [], settings: {} }),
-    ).rejects.toThrow(/restoreVersion failed: clear fail/);
+      restoreVersion(client, { surfaces: [{ id: 'main' }], paintedCells: [], settings: {} }),
+    ).rejects.toThrow(/restoreVersion failed: surf fail/);
+  });
+
+  it('aborts subsequent steps when step 1 (surfaces upsert) fails', async () => {
+    // Contract: a thrown error in one step stops the serialized sequence —
+    // project_settings upsert, painted_cells delete, and painted_cells upsert
+    // must not run if surfaces upsert rejects.
+    const deleteNot = vi.fn().mockResolvedValue({ error: null });
+    const del = vi.fn(() => ({ not: deleteNot }));
+    const upsertSurfaces = vi
+      .fn()
+      .mockResolvedValueOnce({ error: { message: 'surf fail' } });
+    const upsertOther = vi.fn().mockResolvedValue({ error: null });
+
+    const fromTable = vi.fn((table: string) => {
+      if (table === 'surfaces') return { upsert: upsertSurfaces };
+      if (table === 'project_settings') return { upsert: upsertOther };
+      if (table === 'painted_cells') return { delete: del, upsert: upsertOther };
+      return {};
+    });
+    const client = { from: fromTable } as any;
+
+    await expect(
+      restoreVersion(client, {
+        surfaces: [{ id: 'main' }],
+        paintedCells: [{ surface_id: 'main', cell_key: '0,0', color: '#fff' }],
+        settings: { id: 1 },
+      }),
+    ).rejects.toThrow(/restoreVersion failed: surf fail/);
+
+    expect(upsertSurfaces).toHaveBeenCalledTimes(1);
+    // project_settings upsert must NOT have been called
+    // painted_cells delete and upsert must NOT have been called
+    expect(upsertOther).not.toHaveBeenCalled();
+    expect(del).not.toHaveBeenCalled();
+    expect(deleteNot).not.toHaveBeenCalled();
   });
 });

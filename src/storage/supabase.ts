@@ -2,6 +2,16 @@ import type { SupabaseClient } from '@supabase/supabase-js';
 import type { Surface } from '@/core/state';
 import type { Tile, TileShape } from '@/core/tile';
 
+/**
+ * A `tiles` row as fetched from Supabase: the core `Tile` domain model plus
+ * storage-layer metadata (created_by). Kept out of `core/tile.ts` so that
+ * UI modules depend only on the minimal `Tile` interface. `TileRow[]` is
+ * assignable to `Tile[]` since TileRow extends Tile.
+ */
+export interface TileRow extends Tile {
+  createdBy: string | null;
+}
+
 export interface VersionRow {
   id: string;
   label: string;
@@ -9,24 +19,75 @@ export interface VersionRow {
   surfacesSnapshot: unknown;
   paintedCellsSnapshot: unknown;
   settingsSnapshot: unknown;
+  schemaVersion: number;
+  createdBy: string | null;
 }
 
 export interface LoadedState {
-  tileLibrary: Tile[];
+  tileLibrary: TileRow[];
   surfaces: Surface[];
   paintedCells: Record<string, Map<string, string>>;
   settings: { ceilFt: number; palette: string[]; selectedColor: string };
   versions: VersionRow[];
 }
 
+// --- Internal DB row shapes (snake_case). These describe what Supabase
+// returns for each select(). Using `as unknown as T[]` at the query boundary
+// gives TS schema-drift protection without the client needing generated types.
+
+interface TileDbRow {
+  id: string;
+  shape: string;
+  size_in: number | string;
+  label: string;
+  created_by: string | null;
+}
+
+interface SurfaceDbRow {
+  id: string;
+  group: Surface['group'];
+  name: string;
+  width_in: number | string;
+  height_in: number | string;
+  note: string | null;
+  height_locked: boolean;
+  tile_id: string;
+}
+
+interface PaintedCellDbRow {
+  surface_id: string;
+  cell_key: string;
+  color: string;
+}
+
+interface ProjectSettingsDbRow {
+  id: number;
+  ceil_ft: number | string;
+  palette: string[] | null;
+  selected_color: string;
+}
+
+interface VersionDbRow {
+  id: string;
+  label: string;
+  created_at: string;
+  surfaces_snapshot: unknown;
+  painted_cells_snapshot: unknown;
+  settings_snapshot: unknown;
+  schema_version: number;
+  created_by: string | null;
+}
+
 /**
  * Load all persisted state from Supabase in parallel. Maps snake_case columns
  * to camelCase fields and groups `painted_cells` rows into a Map per surface.
  * Bubbles a descriptive error if any query fails.
+ *
+ * Throws if the `project_settings` singleton row is missing (migration drift).
  */
 export async function fetchAll(client: SupabaseClient): Promise<LoadedState> {
   const [tilesQ, surfacesQ, cellsQ, settingsQ, versionsQ] = await Promise.all([
-    client.from('tiles').select('id,shape,size_in,label'),
+    client.from('tiles').select('id,shape,size_in,label,created_by'),
     client
       .from('surfaces')
       .select('id,group,name,width_in,height_in,note,height_locked,tile_id'),
@@ -35,7 +96,7 @@ export async function fetchAll(client: SupabaseClient): Promise<LoadedState> {
     client
       .from('versions')
       .select(
-        'id,label,created_at,surfaces_snapshot,painted_cells_snapshot,settings_snapshot',
+        'id,label,created_at,surfaces_snapshot,painted_cells_snapshot,settings_snapshot,schema_version,created_by',
       )
       .order('created_at', { ascending: false }),
   ]);
@@ -44,14 +105,17 @@ export async function fetchAll(client: SupabaseClient): Promise<LoadedState> {
     if (q.error) throw new Error(`Supabase fetch failed: ${q.error.message}`);
   }
 
-  const tileLibrary: Tile[] = (tilesQ.data ?? []).map((r: any) => ({
+  const tileRows = (tilesQ.data ?? []) as unknown as TileDbRow[];
+  const tileLibrary: TileRow[] = tileRows.map((r) => ({
     id: r.id,
     shape: r.shape as TileShape,
     sizeIn: Number(r.size_in),
     label: r.label,
+    createdBy: r.created_by ?? null,
   }));
 
-  const surfaces: Surface[] = (surfacesQ.data ?? []).map((r: any) => ({
+  const surfaceRows = (surfacesQ.data ?? []) as unknown as SurfaceDbRow[];
+  const surfaces: Surface[] = surfaceRows.map((r) => ({
     id: r.id,
     group: r.group,
     name: r.name,
@@ -64,11 +128,8 @@ export async function fetchAll(client: SupabaseClient): Promise<LoadedState> {
 
   const paintedCells: Record<string, Map<string, string>> = {};
   for (const s of surfaces) paintedCells[s.id] = new Map();
-  for (const c of (cellsQ.data ?? []) as Array<{
-    surface_id: string;
-    cell_key: string;
-    color: string;
-  }>) {
+  const cellRows = (cellsQ.data ?? []) as unknown as PaintedCellDbRow[];
+  for (const c of cellRows) {
     let m = paintedCells[c.surface_id];
     if (!m) {
       m = new Map();
@@ -77,24 +138,27 @@ export async function fetchAll(client: SupabaseClient): Promise<LoadedState> {
     m.set(c.cell_key, c.color);
   }
 
-  const settingsRow = (settingsQ.data ?? [])[0] ?? {
-    ceil_ft: 9,
-    palette: [],
-    selected_color: '#b85450',
-  };
+  const settingsRows = (settingsQ.data ?? []) as unknown as ProjectSettingsDbRow[];
+  const settingsRow = settingsRows[0];
+  if (!settingsRow) {
+    throw new Error('project_settings row missing — run migrations?');
+  }
   const settings = {
     ceilFt: Number(settingsRow.ceil_ft),
     palette: (settingsRow.palette ?? []) as string[],
-    selectedColor: settingsRow.selected_color as string,
+    selectedColor: settingsRow.selected_color,
   };
 
-  const versions: VersionRow[] = (versionsQ.data ?? []).map((r: any) => ({
+  const versionRows = (versionsQ.data ?? []) as unknown as VersionDbRow[];
+  const versions: VersionRow[] = versionRows.map((r) => ({
     id: r.id,
     label: r.label,
     createdAt: r.created_at,
     surfacesSnapshot: r.surfaces_snapshot,
     paintedCellsSnapshot: r.painted_cells_snapshot,
     settingsSnapshot: r.settings_snapshot,
+    schemaVersion: r.schema_version,
+    createdBy: r.created_by ?? null,
   }));
 
   return { tileLibrary, surfaces, paintedCells, settings, versions };
@@ -177,7 +241,7 @@ export async function createTile(
     .select()
     .single();
   if (error) throw new Error(`createTile failed: ${error.message}`);
-  const row = data as { id: string; shape: string; size_in: number; label: string };
+  const row = data as unknown as TileDbRow;
   return {
     id: row.id,
     shape: row.shape as TileShape,
@@ -265,14 +329,7 @@ export async function saveVersion(
     .select()
     .single();
   if (error) throw new Error(`saveVersion failed: ${error.message}`);
-  const row = data as {
-    id: string;
-    label: string;
-    created_at: string;
-    surfaces_snapshot: unknown;
-    painted_cells_snapshot: unknown;
-    settings_snapshot: unknown;
-  };
+  const row = data as unknown as VersionDbRow;
   return {
     id: row.id,
     label: row.label,
@@ -280,6 +337,8 @@ export async function saveVersion(
     surfacesSnapshot: row.surfaces_snapshot,
     paintedCellsSnapshot: row.painted_cells_snapshot,
     settingsSnapshot: row.settings_snapshot,
+    schemaVersion: row.schema_version,
+    createdBy: row.created_by ?? null,
   };
 }
 
@@ -287,6 +346,33 @@ export async function saveVersion(
 export async function deleteVersion(client: SupabaseClient, id: string): Promise<void> {
   const { error } = await client.from('versions').delete().eq('id', id);
   if (error) throw new Error(`deleteVersion failed: ${error.message}`);
+}
+
+// --- Snapshot row shapes for restoreVersion. The DB expects snake_case
+// rows because the snapshot arrays were serialized directly from DB reads.
+
+interface SurfaceSnapshotRow {
+  id: string;
+  group: Surface['group'];
+  name: string;
+  width_in: number;
+  height_in: number;
+  note: string | null;
+  height_locked: boolean;
+  tile_id: string;
+}
+
+interface PaintedCellSnapshotRow {
+  surface_id: string;
+  cell_key: string;
+  color: string;
+}
+
+interface SettingsSnapshotRow {
+  id: number;
+  ceil_ft: number;
+  palette: string[];
+  selected_color: string;
 }
 
 /** Shape of a snapshot that can be restored. Rows are already in snake_case. */
@@ -298,42 +384,57 @@ export interface RestoreSnapshot {
 
 /**
  * Restore working state from a saved snapshot. The sequence is:
- *   1. Delete all `painted_cells` rows (PostgREST requires a filter for a
+ *   1. Upsert all `surfaces` rows from the snapshot.
+ *   2. Upsert `project_settings` (id=1).
+ *   3. Delete all existing `painted_cells` (PostgREST requires a filter as a
  *      safety net — we use `.not('surface_id', 'is', null)`, which matches
  *      every row since `surface_id` is NOT NULL).
- *   2. Upsert all `surfaces` rows from the snapshot.
- *   3. Upsert `project_settings` (id=1).
  *   4. Upsert all `painted_cells` from the snapshot.
  *
  * NOT atomic: PostgREST does not expose multi-statement transactions to the
  * client SDK, so a failure partway through may leave the database in an
- * intermediate state. Each step bubbles its error with a descriptive prefix
- * so the caller can show it to the user and decide whether to retry.
+ * intermediate state. This ordering minimizes damage from partial failure:
+ *
+ *   - Failure in step 1 or 2 leaves `painted_cells` untouched — the user
+ *     still sees their previous design.
+ *   - Failure in step 3 (the wipe) leaves prior painted_cells intact; only
+ *     surfaces/settings are drifted from before.
+ *   - Failure in step 4 after step 3 succeeds leaves an empty `painted_cells`
+ *     table; the narrowest partial-loss window. The caller should re-attempt
+ *     the restore or warn the user.
+ *
+ * Each step bubbles its error with a descriptive prefix, and a thrown error
+ * aborts the remaining steps so later operations do not run against a
+ * partially-restored database.
  */
 export async function restoreVersion(
   client: SupabaseClient,
   snapshot: RestoreSnapshot,
 ): Promise<void> {
-  // Step 1: wipe painted_cells.
+  // Step 1: upsert surfaces.
+  const surfRes = await client
+    .from('surfaces')
+    .upsert(snapshot.surfaces as unknown as SurfaceSnapshotRow[]);
+  if (surfRes.error) throw new Error(`restoreVersion failed: ${surfRes.error.message}`);
+
+  // Step 2: upsert project_settings.
+  const setRes = await client
+    .from('project_settings')
+    .upsert(snapshot.settings as unknown as SettingsSnapshotRow);
+  if (setRes.error) throw new Error(`restoreVersion failed: ${setRes.error.message}`);
+
+  // Step 3: wipe existing painted_cells.
   const clearRes = await client
     .from('painted_cells')
     .delete()
     .not('surface_id', 'is', null);
   if (clearRes.error) throw new Error(`restoreVersion failed: ${clearRes.error.message}`);
 
-  // Step 2: upsert surfaces.
-  const surfRes = await client.from('surfaces').upsert(snapshot.surfaces as any);
-  if (surfRes.error) throw new Error(`restoreVersion failed: ${surfRes.error.message}`);
-
-  // Step 3: upsert project_settings.
-  const setRes = await client.from('project_settings').upsert(snapshot.settings as any);
-  if (setRes.error) throw new Error(`restoreVersion failed: ${setRes.error.message}`);
-
   // Step 4: upsert painted_cells (if any).
   if (snapshot.paintedCells.length > 0) {
     const cellsRes = await client
       .from('painted_cells')
-      .upsert(snapshot.paintedCells as any);
+      .upsert(snapshot.paintedCells as unknown as PaintedCellSnapshotRow[]);
     if (cellsRes.error) throw new Error(`restoreVersion failed: ${cellsRes.error.message}`);
   }
 }
