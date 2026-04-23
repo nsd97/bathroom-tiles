@@ -1,5 +1,6 @@
 export interface LayoutRefs {
   ceilInput: HTMLInputElement;
+  tileLibraryEl: HTMLElement;
   swatchesEl: HTMLElement;
   toolButtons: HTMLButtonElement[];
   countsEl: HTMLElement;
@@ -24,6 +25,10 @@ export function mountLayout(root: HTMLElement): LayoutRefs {
           <label for="ceil">Ceiling height</label>
           <div><input type="number" id="ceil" value="9" step="0.5" min="7" max="14"> <span class="sub">ft</span></div>
         </div>
+      </section>
+      <section>
+        <h2>Tiles</h2>
+        <div id="tile-library"></div>
       </section>
       <section>
         <h2>Palette</h2>
@@ -67,6 +72,7 @@ export function mountLayout(root: HTMLElement): LayoutRefs {
 
   return {
     ceilInput: q<HTMLInputElement>('#ceil'),
+    tileLibraryEl: q('#tile-library'),
     swatchesEl: q('#swatches'),
     toolButtons: Array.from(root.querySelectorAll<HTMLButtonElement>('.tool-btn')),
     countsEl: q('#counts'),

@@ -15,6 +15,9 @@ import {
   subscribeAll,
   paintCells,
   eraseCell,
+  eraseSurfacePaint,
+  createTile,
+  setSurfaceTile,
   updateSettings,
   updateSurfaceDims,
 } from './storage/supabase';
@@ -34,6 +37,7 @@ import { renderCounts } from './ui/counts';
 import type { CountsRefs } from './ui/counts';
 import { renderCanvas, wireCanvasPainting } from './ui/surface';
 import type { SurfaceCallbacks } from './ui/surface';
+import { renderTileLibrary, renderNewTileForm } from './ui/tile-library';
 
 async function boot(): Promise<void> {
   const root = document.getElementById('app');
@@ -99,6 +103,11 @@ async function mountApp(root: HTMLElement): Promise<void> {
   // it when the echo comes back around.
   const pendingKeys = new Set<string>();
 
+  // Closure state for Phase 5: the currently focused surface drives the
+  // library's active-row highlight, and tile-assignment gates. Null means
+  // "no surface has ever been interacted with this session".
+  let focusedSurfaceId: string | null = null;
+
   const countsRefs: CountsRefs = {
     countsEl: refs.countsEl,
     totalEl: refs.totalEl,
@@ -113,6 +122,8 @@ async function mountApp(root: HTMLElement): Promise<void> {
   const surfaceCb: SurfaceCallbacks = {
     onRerenderCounts: rerenderCounts,
     onRenderSwatches: () => doRenderSwatches(),
+    focusedSurfaceId: null,
+    onFocusSurface: (surfaceId) => focusSurface(surfaceId),
     persist: () => {
       // No-op: Supabase is the source of truth; per-action commits handle it.
     },
@@ -181,8 +192,173 @@ async function mountApp(root: HTMLElement): Promise<void> {
     });
   };
 
+  // --- Tile library panel -----------------------------------------------
+  // `doRenderTileLibrary` is the single entry point for refreshing the
+  // panel: after mutations, after a realtime echo, or after focus changes.
+  const doRenderTileLibrary = (): void => {
+    const focusedSurface = focusedSurfaceId
+      ? state.surfaces.find((s) => s.id === focusedSurfaceId)
+      : null;
+    renderTileLibrary(refs.tileLibraryEl, state.tileLibrary, {
+      focusedSurfaceId,
+      focusedSurfaceTileId: focusedSurface?.tileId ?? null,
+      inUseCount: (tileId) => state.surfaces.filter((s) => s.tileId === tileId).length,
+      onSelect: (tile) => onSelectTile(tile),
+      onDelete: () => {
+        // Wired in a later commit (Task 5.4).
+        console.info('[tile-library] delete not yet wired');
+      },
+      onAddRequested: () => {
+        renderNewTileForm(refs.tileLibraryEl, {
+          onCancel: () => doRenderTileLibrary(),
+          onCreate: (draft) => {
+            // Client-generated UUID so we can seed the echo-suppression key
+            // BEFORE awaiting the network round-trip.
+            const id = crypto.randomUUID();
+            const key = `tile:${id}`;
+            pendingKeys.add(key);
+            // Optimistic append — the realtime echo will be suppressed, but
+            // if the insert fails we roll back below.
+            const optimistic = { id, shape: draft.shape, sizeIn: draft.sizeIn, label: draft.label };
+            state.tileLibrary.push(optimistic);
+            doRenderTileLibrary();
+            createTile(supabase, {
+              id,
+              shape: draft.shape,
+              sizeIn: draft.sizeIn,
+              label: draft.label,
+            }).catch((e: unknown) => {
+              console.warn('[createTile]', e);
+              pendingKeys.delete(key);
+              state.tileLibrary = state.tileLibrary.filter((t) => t.id !== id);
+              doRenderTileLibrary();
+            });
+          },
+        });
+      },
+    });
+  };
+
+  /** Update the focused surface, rerender the library, and toggle `.focused`. */
+  function focusSurface(surfaceId: string): void {
+    if (focusedSurfaceId === surfaceId) return;
+    focusedSurfaceId = surfaceId;
+    surfaceCb.focusedSurfaceId = surfaceId;
+    // Targeted DOM toggle — no need to rebuild the whole canvas for a class.
+    refs.canvas2d.querySelectorAll<HTMLElement>('.surface.focused').forEach((el) => {
+      el.classList.remove('focused');
+    });
+    const el = refs.canvas2d.querySelector<HTMLElement>(
+      `.surface[data-surface-id="${surfaceId}"]`,
+    );
+    el?.classList.add('focused');
+    doRenderTileLibrary();
+  }
+
+  /**
+   * Library row click → assign tile to focused surface. If the shape changes
+   * AND cells are painted, show an inline confirm above the focused surface.
+   */
+  function onSelectTile(tile: Tile): void {
+    if (!focusedSurfaceId) {
+      console.info('[tile-library] no focused surface; ignoring select');
+      return;
+    }
+    const surface = state.surfaces.find((s) => s.id === focusedSurfaceId);
+    if (!surface) return;
+    if (surface.tileId === tile.id) return;
+    const currentTile = state.tileLibrary.find((t) => t.id === surface.tileId);
+    const paintedCount = state.tiles[surface.id]?.size ?? 0;
+    const shapeDiffers = !currentTile || currentTile.shape !== tile.shape;
+    if (!shapeDiffers || paintedCount === 0) {
+      applyTileAssignment(surface.id, tile.id, false);
+      return;
+    }
+    showSwitchConfirm(surface.id, tile, paintedCount);
+  }
+
+  function applyTileAssignment(surfaceId: string, tileId: string, clearPaint: boolean): void {
+    const surface = state.surfaces.find((s) => s.id === surfaceId);
+    if (!surface) return;
+    const surfKey = `surface:${surfaceId}`;
+    pendingKeys.add(surfKey);
+    // Optimistic local mutation — the realtime echo will be suppressed by
+    // the pending key, so without this the tile chip and library active-row
+    // wouldn't update until another browser mutated the same surface.
+    surface.tileId = tileId;
+    const doSet = (): Promise<void> =>
+      setSurfaceTile(supabase, surfaceId, tileId).catch((e: unknown) => {
+        console.warn('[setSurfaceTile]', e);
+        pendingKeys.delete(surfKey);
+      });
+    if (!clearPaint) {
+      renderCanvas(refs.canvas2d, state, surfaceCb);
+      doRenderTileLibrary();
+      rerenderCounts();
+      void doSet();
+      // renderCanvas rebuilds .surface elements; surfaceCb.focusedSurfaceId
+      // is baked into renderSurface so the .focused class is reapplied
+      // automatically — no further work needed.
+      return;
+    }
+    // Seed per-cell delete keys so the realtime echoes are suppressed, then
+    // wipe painted_cells, then assign the new tile. Also clear the local
+    // paint map so counts + grid clear immediately.
+    const cells = state.tiles[surfaceId];
+    const cellKeysSnapshot = cells ? Array.from(cells.keys()) : [];
+    for (const key of cellKeysSnapshot) {
+      pendingKeys.add(`painted_cell:${surfaceId}:${key}`);
+    }
+    state.tiles[surfaceId] = new Map();
+    renderCanvas(refs.canvas2d, state, surfaceCb);
+    doRenderTileLibrary();
+    rerenderCounts();
+    eraseSurfacePaint(supabase, surfaceId)
+      .catch((e: unknown) => {
+        console.warn('[eraseSurfacePaint]', e);
+        for (const key of cellKeysSnapshot) {
+          pendingKeys.delete(`painted_cell:${surfaceId}:${key}`);
+        }
+      })
+      .then(() => doSet());
+  }
+
+  /** Render an inline confirm bar inside the focused surface's head. */
+  function showSwitchConfirm(surfaceId: string, tile: Tile, paintedCount: number): void {
+    const surfEl = refs.canvas2d.querySelector<HTMLElement>(
+      `.surface[data-surface-id="${surfaceId}"]`,
+    );
+    if (!surfEl) return;
+    // Dismiss any prior bar for this surface.
+    surfEl.querySelector('.switch-confirm')?.remove();
+    const bar = document.createElement('div');
+    bar.className = 'switch-confirm';
+    const msg = document.createElement('span');
+    const cellsWord = paintedCount === 1 ? 'painted cell' : 'painted cells';
+    msg.textContent = `Switching tiles clears ${paintedCount} ${cellsWord}.`;
+    const actions = document.createElement('div');
+    actions.className = 'switch-confirm-actions';
+    const switchBtn = document.createElement('button');
+    switchBtn.type = 'button';
+    switchBtn.className = 'switch-btn';
+    switchBtn.textContent = 'Switch';
+    switchBtn.addEventListener('click', () => {
+      bar.remove();
+      applyTileAssignment(surfaceId, tile.id, true);
+    });
+    const cancelBtn = document.createElement('button');
+    cancelBtn.type = 'button';
+    cancelBtn.className = 'switch-cancel';
+    cancelBtn.textContent = 'Cancel';
+    cancelBtn.addEventListener('click', () => bar.remove());
+    actions.append(switchBtn, cancelBtn);
+    bar.append(msg, actions);
+    surfEl.insertBefore(bar, surfEl.firstChild);
+  }
+
   const rerenderAll = (): void => {
     doRenderSwatches();
+    doRenderTileLibrary();
     rerenderCanvas();
     rerenderCounts();
   };
@@ -192,8 +368,18 @@ async function mountApp(root: HTMLElement): Promise<void> {
   const unsubscribeRealtime = subscribeAll(
     supabase,
     {
-      onTile: (c) => applyTileChange(state, c),
-      onSurface: (c) => applySurfaceChange(state, c, refs.canvas2d, surfaceCb, rerenderCounts),
+      onTile: (c) => {
+        applyTileChange(state, c);
+        doRenderTileLibrary();
+        // A tile rename/shape change is reflected on each surface-head chip,
+        // so nudge the canvas too — cheap for a library-scale rename.
+        rerenderCanvas();
+      },
+      onSurface: (c) => {
+        applySurfaceChange(state, c, refs.canvas2d, surfaceCb, rerenderCounts);
+        // Surface row changes can shift the focused tileId → library active row.
+        doRenderTileLibrary();
+      },
       onPaintedCell: (c) => applyPaintedCellChange(state, c, refs.canvas2d, rerenderCounts),
       onSettings: (c) => applySettingsChange(state, c, refs, doRenderSwatches, () => rerenderCanvas()),
       onVersion: () => {

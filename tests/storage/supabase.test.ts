@@ -293,8 +293,37 @@ describe('createTile', () => {
     const tile = await createTile(client, { shape: 'square', sizeIn: 3, label: 'Square 3"' });
 
     expect(from).toHaveBeenCalledWith('tiles');
+    // When no id is supplied, the payload must NOT include the id field —
+    // Postgres uses its default gen_random_uuid().
     expect(insert).toHaveBeenCalledWith({ shape: 'square', size_in: 3, label: 'Square 3"' });
     expect(tile).toEqual({ id: 'uuid-1', shape: 'square', sizeIn: 3, label: 'Square 3"' });
+  });
+
+  it('forwards an explicit id into the insert payload (echo-suppression pattern)', async () => {
+    // Callers that seed `pendingKeys.add("tile:<id>")` BEFORE awaiting must be
+    // able to pass that same id through to the insert.
+    const single = vi.fn().mockResolvedValue({
+      data: { id: 'client-uuid', shape: 'hex-flat', size_in: 4, label: 'Hex (flat) 4"' },
+      error: null,
+    });
+    const select = vi.fn(() => ({ single }));
+    const insert = vi.fn(() => ({ select }));
+    const client = { from: () => ({ insert }) } as any;
+
+    const tile = await createTile(client, {
+      id: 'client-uuid',
+      shape: 'hex-flat',
+      sizeIn: 4,
+      label: 'Hex (flat) 4"',
+    });
+
+    expect(insert).toHaveBeenCalledWith({
+      id: 'client-uuid',
+      shape: 'hex-flat',
+      size_in: 4,
+      label: 'Hex (flat) 4"',
+    });
+    expect(tile.id).toBe('client-uuid');
   });
 
   it('throws a descriptive error on failure', async () => {

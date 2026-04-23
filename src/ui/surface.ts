@@ -3,6 +3,7 @@ import { computeSurfaceStats } from '@/core/stats';
 import { parseDim, formatDim } from '@/core/dimensions';
 import type { State, Surface } from '@/core/state';
 import { effectiveTool } from './tools';
+import { SHAPE_GLYPHS } from './tile-library';
 
 export interface SurfaceCallbacks {
   onRerenderCounts: () => void;
@@ -32,6 +33,14 @@ export interface SurfaceCallbacks {
    * omitted, `persist()` is invoked instead.
    */
   onSurfaceDimsCommit?: (surfaceId: string) => void;
+  /**
+   * Fired when a user interacts with a surface — either by clicking its head
+   * or by pressing in its grid. The controller uses this to drive the library
+   * highlight and to scope tile-assignment actions.
+   */
+  onFocusSurface?: (surfaceId: string) => void;
+  /** The currently focused surface id (if any) — used to apply `.focused`. */
+  focusedSurfaceId?: string | null;
 }
 
 export function renderCanvas(canvas: HTMLElement, state: State, cb: SurfaceCallbacks): void {
@@ -66,15 +75,35 @@ function renderSurface(s: Surface, state: State, canvas: HTMLElement, cb: Surfac
 
   const surf = document.createElement('div');
   surf.className = 'surface';
+  if (cb.focusedSurfaceId === s.id) surf.classList.add('focused');
   surf.dataset.surfaceId = s.id;
 
   const head = document.createElement('div');
   head.className = 'surface-head';
+  if (cb.onFocusSurface) {
+    head.addEventListener('click', (e) => {
+      // Let inputs receive their own events without stealing focus.
+      if ((e.target as HTMLElement | null)?.closest('input,button')) return;
+      cb.onFocusSurface?.(s.id);
+    });
+  }
 
   const nameLine = document.createElement('div');
   nameLine.className = 'surface-name';
   nameLine.textContent = s.name;
   head.appendChild(nameLine);
+
+  // Tile chip: text-only "Tile: <glyph> <label>". Looks up from state.tileLibrary
+  // so that a tile rename or swap is reflected here on next rerender.
+  const tile = state.tileLibrary.find((t) => t.id === s.tileId);
+  const chip = document.createElement('div');
+  chip.className = 'tile-chip';
+  if (tile) {
+    chip.textContent = `Tile: ${SHAPE_GLYPHS[tile.shape]} ${tile.label}`;
+  } else {
+    chip.textContent = 'Tile: \u2014';
+  }
+  head.appendChild(chip);
 
   const meta = document.createElement('div');
   meta.className = 'surface-meta';
@@ -245,6 +274,7 @@ export function wireCanvasPainting(canvas: HTMLElement, state: State, cb: Surfac
     e.preventDefault();
     const t = tileFromEvent(e);
     if (!t) return;
+    if (cb.onFocusSurface) cb.onFocusSurface(t.surfaceId);
     painting = true;
     stroke = emptyStroke();
     apply(state, canvas, t, e, cb, stroke);

@@ -231,16 +231,27 @@ export async function eraseSurfacePaint(
 }
 
 /**
- * Insert a tile and return it (with its generated UUID) mapped to the
- * camelCase `Tile` shape. Uses `.select().single()` to get the created row.
+ * Insert a tile and return it mapped to the camelCase `Tile` shape. Uses
+ * `.select().single()` to get the created row.
+ *
+ * If `input.id` is omitted the DB default (`gen_random_uuid()`) generates the
+ * primary key. If `input.id` is supplied, that value is used — this is how
+ * the tile-library UI seeds an echo-suppression key (`tile:<id>`) BEFORE
+ * awaiting the insert, avoiding a realtime-echo race.
  */
 export async function createTile(
   client: SupabaseClient,
-  input: { shape: TileShape; sizeIn: number; label: string },
+  input: { id?: string; shape: TileShape; sizeIn: number; label: string },
 ): Promise<Tile> {
+  const payload: Record<string, unknown> = {
+    shape: input.shape,
+    size_in: input.sizeIn,
+    label: input.label,
+  };
+  if (input.id !== undefined) payload['id'] = input.id;
   const { data, error } = await client
     .from('tiles')
-    .insert({ shape: input.shape, size_in: input.sizeIn, label: input.label })
+    .insert(payload)
     .select()
     .single();
   if (error) throw new Error(`createTile failed: ${error.message}`);
