@@ -10,6 +10,7 @@ import { renderSwatches } from './ui/swatches';
 import { wireToolButtons } from './ui/tools';
 import { renderCanvas, wireCanvasPainting } from './ui/surface';
 import { renderCounts } from './ui/counts';
+import { render3D } from './preview3d/preview';
 
 const root = document.getElementById('app');
 if (!root) throw new Error('missing #app');
@@ -51,6 +52,7 @@ refs.ceilInput.addEventListener('change', () => {
   for (const s of state.surfaces) if (s.heightLocked) s.heightIn = ceilIn;
   renderCanvas(refs.canvas2d, state, surfaceCb);
   doRenderCounts();
+  if (state.viewMode === '3d') render3D(refs.canvas3d, state, () => persist(state));
   persist(state);
 });
 
@@ -110,3 +112,23 @@ refs.resetBtn.addEventListener('click', () => {
   doRenderCounts();
   persist(state);
 });
+
+function setViewMode(mode: '2d' | '3d'): void {
+  state.viewMode = mode;
+  refs.viewToggleButtons.forEach(b => b.classList.toggle('active', b.dataset.view === mode));
+  if (mode === '3d') {
+    refs.canvas2d.hidden = true;
+    refs.canvas3d.hidden = false;
+    render3D(refs.canvas3d, state, () => persist(state));
+  } else {
+    refs.canvas3d.hidden = true;
+    refs.canvas2d.hidden = false;
+  }
+  persist(state);
+}
+
+refs.viewToggleButtons.forEach((b) => {
+  b.addEventListener('click', () => setViewMode(b.dataset.view as '2d' | '3d'));
+});
+
+setViewMode(state.viewMode);
