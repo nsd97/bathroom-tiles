@@ -38,7 +38,7 @@ export interface LoadedState {
 // returns for each select(). Using `as unknown as T[]` at the query boundary
 // gives TS schema-drift protection without the client needing generated types.
 
-interface TileDbRow {
+export interface TileDbRow {
   id: string;
   shape: string;
   size_in: number | string;
@@ -46,7 +46,7 @@ interface TileDbRow {
   created_by: string | null;
 }
 
-interface SurfaceDbRow {
+export interface SurfaceDbRow {
   id: string;
   group: Surface['group'];
   name: string;
@@ -57,20 +57,20 @@ interface SurfaceDbRow {
   tile_id: string;
 }
 
-interface PaintedCellDbRow {
+export interface PaintedCellDbRow {
   surface_id: string;
   cell_key: string;
   color: string;
 }
 
-interface ProjectSettingsDbRow {
+export interface ProjectSettingsDbRow {
   id: number;
   ceil_ft: number | string;
   palette: string[] | null;
   selected_color: string;
 }
 
-interface VersionDbRow {
+export interface VersionDbRow {
   id: string;
   label: string;
   created_at: string;
@@ -449,11 +449,14 @@ export async function restoreVersion(
  * insert/update; for deletes we copy `oldRow` into `row` so that consumers
  * always have a populated `row` to index into. `oldRow` is present for
  * update/delete and undefined for insert.
+ *
+ * `TRow` narrows the row shape per-table (see the `*DbRow` interfaces).
+ * Defaults to `Record<string, unknown>` when no narrowing is needed.
  */
-export interface Change {
+export interface Change<TRow = Record<string, unknown>> {
   kind: 'insert' | 'update' | 'delete';
-  row: Record<string, unknown>;
-  oldRow?: Record<string, unknown>;
+  row: TRow;
+  oldRow?: TRow;
 }
 
 /**
@@ -462,11 +465,20 @@ export interface Change {
  * handler takes a simpler shape.
  */
 export interface ChangeHandlers {
-  onTile: (change: Change) => void;
-  onSurface: (change: Change) => void;
-  onPaintedCell: (change: Change) => void;
-  onSettings: (change: { row: Record<string, unknown> }) => void;
-  onVersion: (change: Change) => void;
+  onTile: (change: Change<TileDbRow>) => void;
+  onSurface: (change: Change<SurfaceDbRow>) => void;
+  onPaintedCell: (change: Change<PaintedCellDbRow>) => void;
+  onSettings: (change: { row: ProjectSettingsDbRow }) => void;
+  onVersion: (change: Change<VersionDbRow>) => void;
+  /**
+   * Optional channel-status hook. Invoked by Supabase's realtime client on
+   * `SUBSCRIBED` / `CHANNEL_ERROR` / `TIMED_OUT` / `CLOSED`. Use this to
+   * surface a "Reconnecting…" UI pill or log transport failures.
+   */
+  onStatus?: (
+    status: 'SUBSCRIBED' | 'CHANNEL_ERROR' | 'TIMED_OUT' | 'CLOSED',
+    err?: Error,
+  ) => void;
 }
 
 /**
@@ -499,6 +511,12 @@ function strField(row: Record<string, unknown>, key: string): string | undefined
  *     painted_cell:<surface_id>:<cell_key>          (delete)
  *   - settings:1
  *   - version:<id>
+ *
+ * Pending keys are NOT multiset-safe. If two concurrent mutations produce the
+ * same key (e.g., two users paint the same cell with the same color), the
+ * first echo will consume the pending key and the second echo will reach
+ * handlers. Acceptable for last-write-wins; rely on UI-level reconciliation
+ * for the edge case.
  */
 function computePendingKey(payload: RealtimePayload): string | undefined {
   const kindTable = payload.table;
@@ -540,6 +558,9 @@ function computePendingKey(payload: RealtimePayload): string | undefined {
  * Pure dispatcher: given a realtime payload, either suppress (echo of our own
  * write) or route to the appropriate handler. Exported so tests can exercise
  * it directly without mocking an entire channel.
+ *
+ * Side-effect: mutates `pendingKeys` by removing the matched key on
+ * echo-suppression. Returns `void`.
  */
 export function dispatchRealtimeEvent(
   payload: RealtimePayload,
@@ -564,28 +585,47 @@ export function dispatchRealtimeEvent(
           : undefined;
   if (!kind) return;
 
-  const change: Change =
-    kind === 'insert'
-      ? { kind, row: newRow, oldRow: undefined }
-      : kind === 'update'
-        ? { kind, row: newRow, oldRow }
-        : { kind, row: oldRow, oldRow };
+  // Row chosen by kind: insert/update surface `newRow` as the row; delete
+  // exposes `oldRow` as the row so consumers always have something to index.
+  const row = kind === 'delete' ? oldRow : newRow;
+  const oldRowOrUndef = kind === 'insert' ? undefined : oldRow;
 
+  // Cast happens once here at the dispatch boundary; handlers downstream
+  // then have typed access to their per-table row shape. `as unknown as T`
+  // because each TRow has required fields that the opaque `Record` doesn't
+  // structurally satisfy — this matches the schema-drift pattern used for
+  // `select()` results above.
   switch (payload.table) {
     case 'tiles':
-      handlers.onTile(change);
+      handlers.onTile({
+        kind,
+        row: row as unknown as TileDbRow,
+        oldRow: oldRowOrUndef as unknown as TileDbRow | undefined,
+      });
       return;
     case 'surfaces':
-      handlers.onSurface(change);
+      handlers.onSurface({
+        kind,
+        row: row as unknown as SurfaceDbRow,
+        oldRow: oldRowOrUndef as unknown as SurfaceDbRow | undefined,
+      });
       return;
     case 'painted_cells':
-      handlers.onPaintedCell(change);
+      handlers.onPaintedCell({
+        kind,
+        row: row as unknown as PaintedCellDbRow,
+        oldRow: oldRowOrUndef as unknown as PaintedCellDbRow | undefined,
+      });
       return;
     case 'project_settings':
-      handlers.onSettings({ row: change.row });
+      handlers.onSettings({ row: row as unknown as ProjectSettingsDbRow });
       return;
     case 'versions':
-      handlers.onVersion(change);
+      handlers.onVersion({
+        kind,
+        row: row as unknown as VersionDbRow,
+        oldRow: oldRowOrUndef as unknown as VersionDbRow | undefined,
+      });
       return;
     default:
       return;
@@ -602,6 +642,16 @@ export function dispatchRealtimeEvent(
  * format). On each event the dispatcher consumes and removes a matching key,
  * or otherwise invokes the corresponding handler. Supabase's SDK retries on
  * CHANNEL_ERROR / TIMED_OUT internally, so we do not layer our own retry.
+ *
+ * **Contract for callers:** before awaiting any mutation (paintCell,
+ * createTile, etc.), call `pendingKeys.add(<key>)` using the same format as
+ * `computePendingKey`. If you seed AFTER the await, the realtime echo can
+ * race and cause flicker. The canonical pattern is:
+ * ```ts
+ * const key = `painted_cell:${surfaceId}:${cellKey}:${color}`;
+ * pendingKeys.add(key);
+ * await paintCell(client, surfaceId, cellKey, color);
+ * ```
  */
 export function subscribeAll(
   client: SupabaseClient,
@@ -623,8 +673,15 @@ export function subscribeAll(
       (payload: RealtimePayload) => dispatchRealtimeEvent(payload, handlers, pendingKeys),
     );
   }
-  channel.subscribe();
+  if (handlers.onStatus) {
+    const onStatus = handlers.onStatus;
+    channel.subscribe((status, err) => onStatus(status, err));
+  } else {
+    channel.subscribe();
+  }
   return () => {
-    void client.removeChannel(channel);
+    client.removeChannel(channel).catch((err: unknown) => {
+      console.warn('[storage] removeChannel failed', err);
+    });
   };
 }

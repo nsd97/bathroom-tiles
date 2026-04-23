@@ -844,7 +844,7 @@ describe('subscribeAll', () => {
       },
     );
     chain['subscribe'] = subscribe;
-    const removeChannel = vi.fn();
+    const removeChannel = vi.fn().mockResolvedValue('ok');
     const client = {
       channel: vi.fn(() => chain),
       removeChannel,
@@ -901,7 +901,7 @@ describe('subscribeAll', () => {
     chain['subscribe'] = vi.fn();
     const client = {
       channel: vi.fn(() => chain),
-      removeChannel: vi.fn(),
+      removeChannel: vi.fn().mockResolvedValue('ok'),
     } as unknown as Parameters<typeof subscribeAll>[0];
 
     const handlers = makeHandlers();
@@ -922,5 +922,41 @@ describe('subscribeAll', () => {
       row: { surface_id: 'main', cell_key: '0,0', color: '#fff' },
       oldRow: undefined,
     });
+  });
+
+  it('invokes handlers.onStatus when the channel subscribe-callback fires', () => {
+    // subscribe() accepts an optional (status, err) => void callback. When the
+    // consumer passes an onStatus handler, subscribeAll should forward the
+    // Supabase-reported status through verbatim.
+    let captured: ((status: string, err?: Error) => void) | undefined;
+    const chain: Record<string, unknown> = {};
+    chain['on'] = vi.fn(() => chain);
+    chain['subscribe'] = vi.fn((cb?: (status: string, err?: Error) => void) => {
+      captured = cb;
+    });
+    const client = {
+      channel: vi.fn(() => chain),
+      removeChannel: vi.fn().mockResolvedValue('ok'),
+    } as unknown as Parameters<typeof subscribeAll>[0];
+
+    const onStatus = vi.fn();
+    const handlers: ChangeHandlers = {
+      onTile: vi.fn(),
+      onSurface: vi.fn(),
+      onPaintedCell: vi.fn(),
+      onSettings: vi.fn(),
+      onVersion: vi.fn(),
+      onStatus,
+    };
+
+    subscribeAll(client, handlers, new Set());
+
+    expect(captured).toBeDefined();
+    const err = new Error('boom');
+    captured!('CHANNEL_ERROR', err);
+    expect(onStatus).toHaveBeenCalledWith('CHANNEL_ERROR', err);
+
+    captured!('SUBSCRIBED');
+    expect(onStatus).toHaveBeenCalledWith('SUBSCRIBED', undefined);
   });
 });
