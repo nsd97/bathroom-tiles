@@ -66,12 +66,3 @@ export function initialState(): State {
     orbit: { rotX: -18, rotY: -28 },
   };
 }
-
-export function initTiles(
-  surfaces: Surface[],
-  prev?: Record<string, Map<string, string>>,
-): Record<string, Map<string, string>> {
-  const tiles: Record<string, Map<string, string>> = {};
-  for (const s of surfaces) tiles[s.id] = prev?.[s.id] ?? new Map();
-  return tiles;
-}
