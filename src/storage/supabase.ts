@@ -162,3 +162,178 @@ export async function eraseSurfacePaint(
     .eq('surface_id', surfaceId);
   if (error) throw new Error(`eraseSurfacePaint failed: ${error.message}`);
 }
+
+/**
+ * Insert a tile and return it (with its generated UUID) mapped to the
+ * camelCase `Tile` shape. Uses `.select().single()` to get the created row.
+ */
+export async function createTile(
+  client: SupabaseClient,
+  input: { shape: TileShape; sizeIn: number; label: string },
+): Promise<Tile> {
+  const { data, error } = await client
+    .from('tiles')
+    .insert({ shape: input.shape, size_in: input.sizeIn, label: input.label })
+    .select()
+    .single();
+  if (error) throw new Error(`createTile failed: ${error.message}`);
+  const row = data as { id: string; shape: string; size_in: number; label: string };
+  return {
+    id: row.id,
+    shape: row.shape as TileShape,
+    sizeIn: Number(row.size_in),
+    label: row.label,
+  };
+}
+
+/**
+ * Delete a tile. If the row is referenced by any surface, Postgres FK-restrict
+ * will reject the delete and the error message is bubbled as-is.
+ */
+export async function deleteTile(client: SupabaseClient, id: string): Promise<void> {
+  const { error } = await client.from('tiles').delete().eq('id', id);
+  if (error) throw new Error(`deleteTile failed: ${error.message}`);
+}
+
+/** Update a surface's width/height. */
+export async function updateSurfaceDims(
+  client: SupabaseClient,
+  id: string,
+  dims: { widthIn: number; heightIn: number },
+): Promise<void> {
+  const { error } = await client
+    .from('surfaces')
+    .update({ width_in: dims.widthIn, height_in: dims.heightIn })
+    .eq('id', id);
+  if (error) throw new Error(`updateSurfaceDims failed: ${error.message}`);
+}
+
+/** Assign a different tile to a surface. */
+export async function setSurfaceTile(
+  client: SupabaseClient,
+  surfaceId: string,
+  tileId: string,
+): Promise<void> {
+  const { error } = await client
+    .from('surfaces')
+    .update({ tile_id: tileId })
+    .eq('id', surfaceId);
+  if (error) throw new Error(`setSurfaceTile failed: ${error.message}`);
+}
+
+/**
+ * Patch the singleton `project_settings` row (id=1). Only the camelCase keys
+ * present in `partial` are mapped and sent; omitting a key leaves the DB
+ * value unchanged. No-op when `partial` is empty.
+ */
+export async function updateSettings(
+  client: SupabaseClient,
+  partial: { ceilFt?: number; palette?: string[]; selectedColor?: string },
+): Promise<void> {
+  const patch: Record<string, unknown> = {};
+  if (partial.ceilFt !== undefined) patch['ceil_ft'] = partial.ceilFt;
+  if (partial.palette !== undefined) patch['palette'] = partial.palette;
+  if (partial.selectedColor !== undefined) patch['selected_color'] = partial.selectedColor;
+  if (Object.keys(patch).length === 0) return;
+  const { error } = await client.from('project_settings').update(patch).eq('id', 1);
+  if (error) throw new Error(`updateSettings failed: ${error.message}`);
+}
+
+export interface VersionSnapshots {
+  surfaces: unknown;
+  paintedCells: unknown;
+  settings: unknown;
+}
+
+/**
+ * Insert a versions row carrying JSON snapshots of surfaces / painted cells /
+ * settings, and return the new row mapped to `VersionRow`.
+ */
+export async function saveVersion(
+  client: SupabaseClient,
+  label: string,
+  snapshots: VersionSnapshots,
+): Promise<VersionRow> {
+  const { data, error } = await client
+    .from('versions')
+    .insert({
+      label,
+      surfaces_snapshot: snapshots.surfaces,
+      painted_cells_snapshot: snapshots.paintedCells,
+      settings_snapshot: snapshots.settings,
+    })
+    .select()
+    .single();
+  if (error) throw new Error(`saveVersion failed: ${error.message}`);
+  const row = data as {
+    id: string;
+    label: string;
+    created_at: string;
+    surfaces_snapshot: unknown;
+    painted_cells_snapshot: unknown;
+    settings_snapshot: unknown;
+  };
+  return {
+    id: row.id,
+    label: row.label,
+    createdAt: row.created_at,
+    surfacesSnapshot: row.surfaces_snapshot,
+    paintedCellsSnapshot: row.painted_cells_snapshot,
+    settingsSnapshot: row.settings_snapshot,
+  };
+}
+
+/** Delete a single versions row by id. */
+export async function deleteVersion(client: SupabaseClient, id: string): Promise<void> {
+  const { error } = await client.from('versions').delete().eq('id', id);
+  if (error) throw new Error(`deleteVersion failed: ${error.message}`);
+}
+
+/** Shape of a snapshot that can be restored. Rows are already in snake_case. */
+export interface RestoreSnapshot {
+  surfaces: unknown[];
+  paintedCells: unknown[];
+  settings: unknown;
+}
+
+/**
+ * Restore working state from a saved snapshot. The sequence is:
+ *   1. Delete all `painted_cells` rows (PostgREST requires a filter for a
+ *      safety net — we use `.not('surface_id', 'is', null)`, which matches
+ *      every row since `surface_id` is NOT NULL).
+ *   2. Upsert all `surfaces` rows from the snapshot.
+ *   3. Upsert `project_settings` (id=1).
+ *   4. Upsert all `painted_cells` from the snapshot.
+ *
+ * NOT atomic: PostgREST does not expose multi-statement transactions to the
+ * client SDK, so a failure partway through may leave the database in an
+ * intermediate state. Each step bubbles its error with a descriptive prefix
+ * so the caller can show it to the user and decide whether to retry.
+ */
+export async function restoreVersion(
+  client: SupabaseClient,
+  snapshot: RestoreSnapshot,
+): Promise<void> {
+  // Step 1: wipe painted_cells.
+  const clearRes = await client
+    .from('painted_cells')
+    .delete()
+    .not('surface_id', 'is', null);
+  if (clearRes.error) throw new Error(`restoreVersion failed: ${clearRes.error.message}`);
+
+  // Step 2: upsert surfaces.
+  const surfRes = await client.from('surfaces').upsert(snapshot.surfaces as any);
+  if (surfRes.error) throw new Error(`restoreVersion failed: ${surfRes.error.message}`);
+
+  // Step 3: upsert project_settings.
+  const setRes = await client.from('project_settings').upsert(snapshot.settings as any);
+  if (setRes.error) throw new Error(`restoreVersion failed: ${setRes.error.message}`);
+
+  // Step 4: upsert painted_cells (if any).
+  if (snapshot.paintedCells.length > 0) {
+    const cellsRes = await client
+      .from('painted_cells')
+      .upsert(snapshot.paintedCells as any);
+    if (cellsRes.error) throw new Error(`restoreVersion failed: ${cellsRes.error.message}`);
+  }
+}
