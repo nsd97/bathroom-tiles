@@ -10,7 +10,20 @@
 
 **Design doc:** `docs/plans/2026-04-23-tile-library-and-supabase-design.md` — read it for context on *why* decisions were made.
 
-**Critical rule — use context7 heavily.** Before writing any code that calls Supabase SDK APIs (auth, realtime, RLS test patterns), query context7 via `mcp__context7__resolve-library-id` + `mcp__context7__query-docs` for `@supabase/supabase-js`. Do not write SDK calls from memory. User explicit requirement.
+**Critical rule — use context7 heavily.** Before writing any code that calls Supabase SDK APIs (auth, realtime, RLS patterns), query context7 via `mcp__context7__resolve-library-id` + `mcp__context7__query-docs` for `/supabase/supabase-js`, `/supabase/supabase`, `/supabase/cli`. Do not write SDK calls from memory. User explicit requirement.
+
+**Context7 library IDs verified for this plan (2026-04-23):**
+- `/supabase/supabase-js` (v2.58.0) — client SDK including `auth.signInWithOtp`, `auth.onAuthStateChange`, `from().upsert()`, `channel().on('postgres_changes', ...).subscribe()`
+- `/supabase/supabase` — RLS patterns, publication management
+- `/supabase/cli` — `projects create`, `link`, `db push`, `migration new`
+
+**Verified SDK patterns the plan depends on (confirmed via context7):**
+- `signInWithOtp({ email, options: { emailRedirectTo } })` — default `shouldCreateUser: true` creates the user on first magic-link click. **This means project-level signups must be ENABLED** for the three allowlisted users to sign in the first time. RLS is the gate on what they can do once signed in.
+- `onAuthStateChange((event, session) => ...)` — returns `{ data: { subscription } }`; call `subscription.unsubscribe()` to clean up.
+- Realtime: `supabase.channel(name).on('postgres_changes', { event, schema, table }, handler).subscribe(statusCb)`. Payload shape: `{ eventType: 'INSERT'|'UPDATE'|'DELETE', new, old, schema, table }`. Channel statuses: `SUBSCRIBED`, `CHANNEL_ERROR`, `TIMED_OUT`, `CLOSED`.
+- `.upsert(rows, { onConflict: 'col1,col2' })` — comma-separated composite works when a matching composite PK/unique constraint exists.
+- `.delete().eq('col', v).eq('col2', v2)` — chained `.eq()` is the documented pattern (prefer over `.match({...})`).
+- RLS — use `(select auth.jwt() ->> 'email')` wrapped in a `select` for per-query caching; `auth.email()` is deprecated.
 
 **Test discipline:** @superpowers:test-driven-development — write the failing test first, confirm it fails, implement minimum code, confirm it passes, commit. @superpowers:verification-before-completion — run tests and typecheck before claiming any task done.
 
@@ -135,13 +148,22 @@ git commit -m "chore: add supabase-js dependency and env typing"
 
 ---
 
-### Task 0.4: Disable new-user signups
+### Task 0.4: Confirm auth provider settings
 
 **Files:** none (dashboard setting)
 
-**Step 1:** Ask user to open https://supabase.com/dashboard/project/<REF>/auth/providers, select Email, turn OFF "Allow new users to sign up." Leave "Confirm email" OFF (magic link is already the confirmation).
+**Context (verified via context7):** `signInWithOtp` with default `shouldCreateUser: true` creates a user on first magic-link click. If "Allow new user signups" is DISABLED, the three allowlisted users cannot sign in the first time — the magic link fails with a user-creation-blocked error. **The RLS allowlist is the actual access gate** (unauthorized emails can sign in but can neither read nor write any row).
 
-**Step 2:** Confirm with user before proceeding. No commit.
+**Step 1:** Ask user to open https://supabase.com/dashboard/project/<REF>/auth/providers → Email. Confirm:
+- **Enable email provider:** ON
+- **Allow new users to sign up:** **ON** (required so magic-link works for the three on first login; RLS will block everyone else from reading/writing).
+- **Confirm email:** OFF (magic link is already the confirmation).
+
+**Step 2:** In auth → URL Configuration, add the local dev URL (`http://localhost:5173`) and any production URL as allowed redirect URLs. The `emailRedirectTo` param in `signInWithOtp` must match one of these.
+
+**Step 3:** Confirm with user before proceeding. No commit.
+
+**Defense-in-depth option (deferred):** once the three users have signed in at least once and appear in `auth.users`, the signup toggle can be flipped OFF. Not required for v1; RLS is sufficient.
 
 ---
 
@@ -150,17 +172,16 @@ git commit -m "chore: add supabase-js dependency and env typing"
 ### Task 1.1: Create the init migration (schema + RLS)
 
 **Files:**
-- Create: `supabase/migrations/0001_init.sql`
+- Create: `supabase/migrations/<TIMESTAMP>_init.sql` (filename produced by `supabase migration new`)
 
-**Step 1:** Before writing: use context7 to verify Supabase RLS syntax and `auth.jwt()` access pattern.
+**Step 1:** Generate the migration file with the CLI (produces the correct timestamp-prefixed filename).
 
-Run:
-```
-mcp__context7__resolve-library-id  { libraryName: "supabase" }
-mcp__context7__query-docs  { query: "postgres RLS policy using auth.jwt email allowlist", libraryId: <from above> }
-```
+Run: `supabase migration new init`
+Expected: creates `supabase/migrations/<YYYYMMDDHHMMSS>_init.sql` (empty). Use this filename — do NOT hand-name it.
 
-**Step 2:** Write `supabase/migrations/0001_init.sql`:
+**Step 2:** RLS syntax is verified via context7 — use `(select auth.jwt() ->> 'email')` wrapped in `select` so Postgres caches the JWT parse per query (Supabase-recommended for RLS perf). `auth.email()` is deprecated; do not use.
+
+**Step 3:** Write the migration contents:
 
 ```sql
 -- tiles: the global tile library
@@ -223,18 +244,18 @@ alter table public.project_settings enable row level security;
 alter table public.versions enable row level security;
 
 create policy "allowlist_read_tiles" on public.tiles for select
-  using (auth.jwt() ->> 'email' in ('deskinnoah@gmail.com','brenda@deskin.ca','mackenzieagretto1@gmail.com'));
+  using ((select auth.jwt() ->> 'email') in ('deskinnoah@gmail.com','brenda@deskin.ca','mackenzieagretto1@gmail.com'));
 create policy "allowlist_write_tiles" on public.tiles for all
-  using (auth.jwt() ->> 'email' in ('deskinnoah@gmail.com','brenda@deskin.ca','mackenzieagretto1@gmail.com'))
-  with check (auth.jwt() ->> 'email' in ('deskinnoah@gmail.com','brenda@deskin.ca','mackenzieagretto1@gmail.com'));
+  using ((select auth.jwt() ->> 'email') in ('deskinnoah@gmail.com','brenda@deskin.ca','mackenzieagretto1@gmail.com'))
+  with check ((select auth.jwt() ->> 'email') in ('deskinnoah@gmail.com','brenda@deskin.ca','mackenzieagretto1@gmail.com'));
 
 -- repeat for surfaces, painted_cells, project_settings, versions
 -- (write out all 10 policies in full — DRY helper not needed at 5 tables)
 ```
 
-**Step 3:** Fill in the remaining 8 policies for `surfaces`, `painted_cells`, `project_settings`, `versions` — same shape.
+**Step 4:** Fill in the remaining 8 policies for `surfaces`, `painted_cells`, `project_settings`, `versions` — same shape, same `(select auth.jwt() ->> 'email')` wrapping.
 
-**Step 4:** Enable realtime on data tables.
+**Step 5:** Enable realtime on data tables.
 
 Append to the migration:
 ```sql
@@ -246,9 +267,9 @@ alter publication supabase_realtime add table public.project_settings;
 alter publication supabase_realtime add table public.versions;
 ```
 
-**Step 5:** Commit the migration file (do NOT push to DB yet).
+**Step 6:** Commit the migration file (do NOT push to DB yet).
 ```bash
-git add supabase/migrations/0001_init.sql
+git add supabase/migrations/
 git commit -m "feat(db): init schema with RLS + realtime publication"
 ```
 
@@ -257,9 +278,14 @@ git commit -m "feat(db): init schema with RLS + realtime publication"
 ### Task 1.2: Create the seed migration
 
 **Files:**
-- Create: `supabase/migrations/0002_seed.sql`
+- Create: `supabase/migrations/<TIMESTAMP>_seed.sql` (generated by CLI)
 
-**Step 1:** Write:
+**Step 1:** Generate the file:
+
+Run: `supabase migration new seed`
+Expected: creates the next timestamped file. Will sort AFTER `init` (because `date +%Y%m%d%H%M%S` is monotonic).
+
+**Step 2:** Write:
 
 ```sql
 -- seed default tile (uuid stable across envs so surfaces can reference it deterministically)
@@ -287,7 +313,7 @@ Note: ceiling walls = `9 * 12 = 108` inches.
 
 **Commit:**
 ```bash
-git add supabase/migrations/0002_seed.sql
+git add supabase/migrations/
 git commit -m "feat(db): seed default tile, surfaces, settings"
 ```
 
@@ -297,23 +323,25 @@ git commit -m "feat(db): seed default tile, surfaces, settings"
 
 **Files:** none
 
-**Step 1:** Push.
+**Step 1:** Dry-run first.
+
+Run: `supabase db push --dry-run`
+Expected: shows the SQL it will apply without applying it. Confirm the two migrations are listed.
+
+**Step 2:** Push.
 
 Run: `supabase db push`
-Expected: applies `0001_init.sql` and `0002_seed.sql` to the remote project. Prompts before applying.
+Expected: applies both migrations to the remote project. Prompts before applying.
 
-**Step 2:** Verify via MCP.
+**Step 3:** Verify tables exist.
 
-Run: `mcp__supabase__list_tables` with schema `public`
-Expected: lists `tiles`, `surfaces`, `painted_cells`, `project_settings`, `versions`.
+If the Supabase MCP is linked to this new project, run:
+- `mcp__supabase__list_tables` with schema `public` → expect `tiles, surfaces, painted_cells, project_settings, versions`
+- `mcp__supabase__execute_sql` with `select count(*) from surfaces` → expect `8`
+- `mcp__supabase__execute_sql` with `select count(*) from tiles` → expect `1`
 
-**Step 3:** Verify seed.
-
-Run: `mcp__supabase__execute_sql` with `select count(*) from surfaces`
-Expected: `8`.
-
-Run: `mcp__supabase__execute_sql` with `select count(*) from tiles`
-Expected: `1`.
+If the MCP is NOT linked to this project (likely for a fresh project), verify via CLI:
+- `supabase db remote --help` to find the appropriate psql-style check, OR simply skip direct DB verification — sign in to the Supabase dashboard Table Editor to eyeball the rows.
 
 No commit (migrations already committed; this is application).
 
@@ -998,13 +1026,18 @@ describe('paintCells (batch)', () => {
 });
 
 describe('eraseCell', () => {
-  it('deletes a painted_cells row', async () => {
-    const del = vi.fn().mockReturnValue({
-      match: vi.fn().mockResolvedValue({ error: null }),
-    });
+  it('deletes a painted_cells row via chained eq()', async () => {
+    const final = vi.fn().mockResolvedValue({ error: null });
+    const secondEq = vi.fn().mockReturnValue({ then: final.mockImplementationOnce((r: any) => Promise.resolve({ error: null })) });
+    // Simpler shape: let the deepest eq return a thenable promise-resolved {error:null}
+    const eq2 = vi.fn().mockResolvedValue({ error: null });
+    const eq1 = vi.fn().mockReturnValue({ eq: eq2 });
+    const del = vi.fn().mockReturnValue({ eq: eq1 });
     const client = { from: () => ({ delete: del }) } as any;
-    await erasCell(client, 'main', '3,5');
+    await eraseCell(client, 'main', '3,5');
     expect(del).toHaveBeenCalled();
+    expect(eq1).toHaveBeenCalledWith('surface_id', 'main');
+    expect(eq2).toHaveBeenCalledWith('cell_key', '3,5');
   });
 });
 ```
@@ -1030,7 +1063,11 @@ export async function paintCells(client: SupabaseClient, surfaceId: string, cell
 }
 
 export async function eraseCell(client: SupabaseClient, surfaceId: string, cellKey: string): Promise<void> {
-  const { error } = await client.from('painted_cells').delete().match({ surface_id: surfaceId, cell_key: cellKey });
+  const { error } = await client
+    .from('painted_cells')
+    .delete()
+    .eq('surface_id', surfaceId)
+    .eq('cell_key', cellKey);
   if (error) throw new Error(`eraseCell failed: ${error.message}`);
 }
 ```
@@ -1094,13 +1131,29 @@ git commit -m "feat(storage): add tile/surface/settings/version mutations"
 - Modify: `src/storage/supabase.ts` (add `subscribeAll`)
 - Create: `tests/storage/subscribe.test.ts` (basic mock test for echo suppression logic)
 
-**Step 1:** Query context7:
+**Step 1:** Pattern (already verified via context7 at plan-writing time):
 
-```
-mcp__context7__query-docs { query: "supabase-js channel postgres_changes subscribe handler typescript" }
+```typescript
+const channel = supabase
+  .channel('bathroom-tiles')
+  .on(
+    'postgres_changes',
+    { event: '*', schema: 'public', table: 'painted_cells' },
+    (payload) => {
+      // payload.eventType: 'INSERT' | 'UPDATE' | 'DELETE'
+      // payload.new: new row (for INSERT/UPDATE) — empty object for DELETE
+      // payload.old: previous row (for UPDATE/DELETE) — empty object for INSERT
+      // payload.schema, payload.table also available
+    },
+  )
+  .subscribe((status, err) => {
+    // status: 'SUBSCRIBED' | 'CHANNEL_ERROR' | 'TIMED_OUT' | 'CLOSED'
+  });
+
+// later: supabase.removeChannel(channel);
 ```
 
-Confirm the current signature — in recent versions it's `client.channel('...').on('postgres_changes', { event: '*', schema: 'public', table: 'x' }, handler).subscribe()`. Note the exact `new` vs `old` record payload shape.
+Re-query context7 only if anything below looks off during implementation. Payload shape has been stable since supabase-js v2.
 
 **Step 2:** Design signature:
 

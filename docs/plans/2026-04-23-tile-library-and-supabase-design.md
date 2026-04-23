@@ -40,8 +40,8 @@
 ## 2. Sharing + auth
 
 - **One shared dataset.** All three users operate on the same rows. No notion of "my project."
-- **Auth:** Supabase Email OTP (magic link / 6-digit code). New-user signups disabled in dashboard settings.
-- **Access control:** RLS policies on every table check `auth.jwt() ->> 'email'` against a hardcoded allowlist of three emails:
+- **Auth:** Supabase Email OTP (magic link). New-user signups **enabled** in dashboard — `signInWithOtp` needs `shouldCreateUser: true` to bootstrap first-time logins. RLS, not the signups toggle, is the real gate.
+- **Access control:** RLS policies on every table check `(select auth.jwt() ->> 'email')` against a hardcoded allowlist of three emails (wrapped in `select` for per-query caching as Supabase recommends):
   - `deskinnoah@gmail.com`
   - `brenda@deskin.ca`
   - `mackenzieagretto1@gmail.com`
@@ -129,10 +129,10 @@ create table versions (
 ```sql
 alter table <t> enable row level security;
 create policy "allowlist_read"  on <t> for select
-  using (auth.jwt() ->> 'email' in ('deskinnoah@gmail.com','brenda@deskin.ca','mackenzieagretto1@gmail.com'));
+  using ((select auth.jwt() ->> 'email') in ('deskinnoah@gmail.com','brenda@deskin.ca','mackenzieagretto1@gmail.com'));
 create policy "allowlist_write" on <t> for all
-  using (auth.jwt() ->> 'email' in (...same...))
-  with check (auth.jwt() ->> 'email' in (...same...));
+  using ((select auth.jwt() ->> 'email') in (...same...))
+  with check ((select auth.jwt() ->> 'email') in (...same...));
 ```
 
 ## 5. Versions (named snapshots)
@@ -220,8 +220,8 @@ supabase/
 1. `supabase login` (user, one-time).
 2. `supabase projects create` — user confirms org + region + db password.
 3. Link local repo to project: `supabase link --project-ref <ref>`.
-4. Write `supabase/migrations/0001_init.sql` and run `supabase db push`.
-5. Dashboard: disable "Allow new user signups."
+4. Generate migrations via `supabase migration new init` / `supabase migration new seed`, fill them in, then `supabase db push`.
+5. Dashboard auth: Email provider ON, **Allow new user signups ON** (needed for first-time magic-link to create each allowlisted user). Add redirect URLs. RLS is the access gate.
 6. Populate `.env.local` with URL + anon key.
 7. Install `@supabase/supabase-js`.
 8. Implement auth gate + `storage/supabase.ts`.
