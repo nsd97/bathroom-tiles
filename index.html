@@ -14,7 +14,8 @@
     --hairline-soft: #e8e8ed;
     --accent: #0071e3;
     --tile-empty: #f5f5f7;
-    --grout: #e5e5ea;
+    --grout: #d5d5da;
+    --cut-indicator: rgba(0, 113, 227, 0.35);
   }
   * { box-sizing: border-box; margin: 0; padding: 0; }
   html, body { height: 100%; }
@@ -211,6 +212,14 @@
   .count-total span:last-child {
     font-variant-numeric: tabular-nums;
   }
+  .count-sub {
+    display: flex;
+    justify-content: space-between;
+    font-size: 11px;
+    color: var(--ink-muted);
+    font-variant-numeric: tabular-nums;
+    margin-top: 4px;
+  }
 
   .io-row { display: flex; gap: 6px; }
   .io-btn {
@@ -279,7 +288,7 @@
   .surfaces {
     display: flex;
     flex-wrap: wrap;
-    gap: 36px;
+    gap: 36px 40px;
     align-items: flex-start;
   }
   .surface {
@@ -287,6 +296,11 @@
     flex-direction: column;
     align-items: flex-start;
     gap: 10px;
+  }
+  .surface-head {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
   }
   .surface-name {
     font-size: 13px;
@@ -298,6 +312,34 @@
     font-variant-numeric: tabular-nums;
     font-family: "SF Mono", Menlo, monospace;
   }
+  .dim-row {
+    display: flex;
+    gap: 6px;
+    align-items: center;
+    font-size: 11px;
+    color: var(--ink-muted);
+    font-family: "SF Mono", Menlo, monospace;
+    margin-top: 2px;
+  }
+  .dim-input {
+    width: 64px;
+    padding: 4px 6px;
+    border: 1px solid var(--hairline-soft);
+    border-radius: 6px;
+    font: inherit;
+    font-family: "SF Mono", Menlo, monospace;
+    font-size: 11px;
+    background: #fff;
+    outline: none;
+    color: var(--ink);
+  }
+  .dim-input:focus { border-color: var(--accent); }
+  .dim-input[disabled] {
+    background: #f5f5f7;
+    color: var(--ink-muted);
+    cursor: not-allowed;
+  }
+  .dim-sep { color: var(--ink-muted); }
   .grid {
     display: grid;
     background: var(--grout);
@@ -310,12 +352,24 @@
     background: var(--tile-empty);
     cursor: crosshair;
     transition: background .05s ease;
+    position: relative;
   }
   .tile:hover {
     outline: 1.5px solid var(--accent);
     outline-offset: -1.5px;
     z-index: 1;
-    position: relative;
+  }
+  .tile.cut::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    background-image: linear-gradient(
+      135deg,
+      transparent 0, transparent 40%,
+      var(--cut-indicator) 40%, var(--cut-indicator) 50%,
+      transparent 50%, transparent 100%
+    );
+    pointer-events: none;
   }
 </style>
 </head>
@@ -365,6 +419,14 @@
       <span>Total</span>
       <span id="total">—</span>
     </div>
+    <div class="count-sub">
+      <span>Full · cut</span>
+      <span id="full-cut-total">—</span>
+    </div>
+    <div class="count-sub">
+      <span>Order (+10% waste)</span>
+      <span id="order-total">—</span>
+    </div>
   </section>
 
   <section>
@@ -380,7 +442,7 @@
 <main>
   <div class="canvas-header">
     <h2>Every surface.</h2>
-    <p>Click or drag to paint. Hold <code>shift</code> to pick a color from an existing tile. Hold <code>option</code> to erase. Your layout saves automatically.</p>
+    <p>Drawn at real dimensions. Edge tiles render at their true cut width with a diagonal mark — every cut still comes from a whole tile of stock, so it counts as one for the order. Click or drag to paint. Hold <code>shift</code> to eyedrop, <code>option</code> to erase.</p>
   </div>
 
   <div id="canvas"></div>
@@ -392,27 +454,26 @@
 
   const TILE_INCH = 7.87;
   const TILE_PX = 18;
-  const SQ_IN_PER_TILE = TILE_INCH * TILE_INCH;
 
   const DEFAULT_PALETTE = [
     '#ffffff', '#f5f5f7', '#d2d2d7', '#86868b', '#1d1d1f', '#000000',
     '#b85450', '#3a5a7a'
   ];
 
-  // Grid dimensions chosen to match the square-footage the user provided,
-  // using aspect ratios drawn from the floor plan where we have one.
-  // ft² ≈ cols * rows * 61.94 / 144
-  function buildSurfaces(ceilFt) {
-    const wallRows = Math.round(ceilFt * 12 / TILE_INCH);
+  // Dimensions derived from the floor plan (14'2" × 6'6" main bathroom).
+  // Main floor = bathroom minus 3'4"-wide shower enclosure on the left.
+  // En suite floor has no plan — default to ≈46 ft²; user can edit inline.
+  function defaultSurfaces(ceilFt) {
+    const ceilIn = ceilFt * 12;
     return [
-      { id: 'main',    group: 'Floors',  name: 'Main bath floor', cols: 21, rows: 9,  dims: `13'9" × 5'11"` },
-      { id: 'ensuite', group: 'Floors',  name: 'En suite floor',  cols: 12, rows: 9,  dims: `7'10" × 5'11"` },
-      { id: 'shower',  group: 'Floors',  name: 'Shower floor',    cols: 11, rows: 5,  dims: `7'3" × 3'3"` },
-      { id: 'ceiling', group: 'Ceiling', name: 'Ceiling',         cols: 21, rows: 17, dims: `combined rooms` },
-      { id: 'wallN',   group: 'Walls',   name: 'North wall',      cols: 22, rows: wallRows, dims: `14'5" × ${ceilFt}'` },
-      { id: 'wallS',   group: 'Walls',   name: 'South wall',      cols: 22, rows: wallRows, dims: `14'5" × ${ceilFt}'` },
-      { id: 'wallE',   group: 'Walls',   name: 'East wall',       cols: 10, rows: wallRows, dims: `6'7" × ${ceilFt}'` },
-      { id: 'wallW',   group: 'Walls',   name: 'West wall',       cols: 10, rows: wallRows, dims: `6'7" × ${ceilFt}'` },
+      { id: 'main',    group: 'Floors',  name: 'Main bath floor', widthIn: 130, heightIn: 78,    note: "plan · 10'10\" × 6'6\" (less shower)" },
+      { id: 'ensuite', group: 'Floors',  name: 'En suite floor',  widthIn: 96,  heightIn: 69,    note: 'editable default · ~46 ft²' },
+      { id: 'shower',  group: 'Floors',  name: 'Shower floor',    widthIn: 40,  heightIn: 78,    note: "plan · 3'4\" × 6'6\"" },
+      { id: 'ceiling', group: 'Ceiling', name: 'Main ceiling',    widthIn: 170, heightIn: 78,    note: "plan · 14'2\" × 6'6\"" },
+      { id: 'wallN',   group: 'Walls',   name: 'North wall',      widthIn: 170, heightIn: ceilIn, note: "plan · 14'2\" · vanity wall", heightLocked: true },
+      { id: 'wallS',   group: 'Walls',   name: 'South wall',      widthIn: 170, heightIn: ceilIn, note: "plan · 14'2\" · tub/toilet wall", heightLocked: true },
+      { id: 'wallE',   group: 'Walls',   name: 'East wall',       widthIn: 78,  heightIn: ceilIn, note: "plan · 6'6\" · door end",  heightLocked: true },
+      { id: 'wallW',   group: 'Walls',   name: 'West wall',       widthIn: 78,  heightIn: ceilIn, note: "plan · 6'6\" · shower end", heightLocked: true },
     ];
   }
 
@@ -422,62 +483,129 @@
     selectedColor: DEFAULT_PALETTE[4],
     tool: 'paint',
     surfaces: [],
-    tiles: {},
+    tiles: {}, // { surfaceId: Map<"r,c", color> } — coordinate keys survive grid resizes
   };
 
-  function initTiles(surfaces, prev = {}) {
-    const tiles = {};
-    for (const s of surfaces) {
-      const len = s.cols * s.rows;
-      const arr = new Array(len).fill(null);
-      if (prev[s.id]) {
-        const plen = prev[s.id].length;
-        for (let i = 0; i < Math.min(len, plen); i++) arr[i] = prev[s.id][i];
-      }
-      tiles[s.id] = arr;
+  // Parse ft-in inputs: "14'2\"", "14'2", "14' 2\"", "170\"", "170in", "170", "14.2ft"
+  function parseDim(raw) {
+    if (raw == null) return NaN;
+    const s = String(raw).trim().toLowerCase()
+      .replace(/[‘’]/g, "'")
+      .replace(/[“”]/g, '"');
+    if (!s) return NaN;
+    const m1 = s.match(/^(-?\d+(?:\.\d+)?)\s*(?:'|ft|feet)\s*(\d+(?:\.\d+)?)?\s*(?:"|in|inch|inches)?$/);
+    if (m1) {
+      const ft = parseFloat(m1[1]);
+      const inch = m1[2] ? parseFloat(m1[2]) : 0;
+      return ft * 12 + inch;
     }
-    return tiles;
+    const m2 = s.match(/^(-?\d+(?:\.\d+)?)\s*(?:"|in|inch|inches)?$/);
+    if (m2) return parseFloat(m2[1]);
+    return NaN;
+  }
+
+  function formatDim(inches) {
+    if (inches == null || isNaN(inches)) return '';
+    const total = Math.round(inches * 100) / 100;
+    const ft = Math.floor(total / 12);
+    const inRem = Math.round((total - ft * 12) * 100) / 100;
+    if (ft === 0) return `${inRem}"`;
+    if (inRem === 0) return `${ft}'`;
+    return `${ft}'${inRem}"`;
+  }
+
+  function cellKey(r, c) { return `${r},${c}`; }
+
+  function getGrid(s) {
+    const wTiles = s.widthIn / TILE_INCH;
+    const hTiles = s.heightIn / TILE_INCH;
+    const fullCols = Math.floor(wTiles + 1e-6);
+    const fullRows = Math.floor(hTiles + 1e-6);
+    const colRem = +(wTiles - fullCols).toFixed(6);
+    const rowRem = +(hTiles - fullRows).toFixed(6);
+    const hasColCut = colRem > 0.01;
+    const hasRowCut = rowRem > 0.01;
+    const cols = fullCols + (hasColCut ? 1 : 0);
+    const rows = fullRows + (hasRowCut ? 1 : 0);
+    const colSizes = [];
+    for (let i = 0; i < fullCols; i++) colSizes.push(TILE_PX);
+    if (hasColCut) colSizes.push(+(colRem * TILE_PX).toFixed(2));
+    const rowSizes = [];
+    for (let i = 0; i < fullRows; i++) rowSizes.push(TILE_PX);
+    if (hasRowCut) rowSizes.push(+(rowRem * TILE_PX).toFixed(2));
+    return { cols, rows, fullCols, fullRows, hasColCut, hasRowCut, colSizes, rowSizes };
+  }
+
+  function isCutCell(grid, r, c) {
+    return (grid.hasColCut && c === grid.cols - 1) || (grid.hasRowCut && r === grid.rows - 1);
   }
 
   function loadSaved() {
     try {
-      const raw = localStorage.getItem('tilePlanner.v1');
-      if (!raw) return null;
-      return JSON.parse(raw);
-    } catch (e) { return null; }
+      const raw = localStorage.getItem('tilePlanner.v2');
+      if (raw) return JSON.parse(raw);
+    } catch (e) {}
+    return null;
   }
 
   function persist() {
     try {
-      localStorage.setItem('tilePlanner.v1', JSON.stringify({
+      const tilesOut = {};
+      for (const [k, m] of Object.entries(state.tiles)) tilesOut[k] = Object.fromEntries(m);
+      localStorage.setItem('tilePlanner.v2', JSON.stringify({
         ceilFt: state.ceilFt,
         palette: state.palette,
         selectedColor: state.selectedColor,
-        tiles: state.tiles,
+        surfaces: state.surfaces.map(s => ({ id: s.id, widthIn: s.widthIn, heightIn: s.heightIn })),
+        tiles: tilesOut,
       }));
     } catch (e) {}
   }
 
-  const saved = loadSaved();
-  if (saved) {
-    if (typeof saved.ceilFt === 'number') state.ceilFt = saved.ceilFt;
-    if (Array.isArray(saved.palette) && saved.palette.length) state.palette = saved.palette;
-    if (saved.selectedColor) state.selectedColor = saved.selectedColor;
+  function initTiles(surfaces, prev) {
+    const tiles = {};
+    for (const s of surfaces) tiles[s.id] = (prev && prev[s.id]) || new Map();
+    return tiles;
   }
-  state.surfaces = buildSurfaces(state.ceilFt);
-  state.tiles = initTiles(state.surfaces, saved?.tiles || {});
+
+  (function init() {
+    const saved = loadSaved();
+    if (saved) {
+      if (typeof saved.ceilFt === 'number') state.ceilFt = saved.ceilFt;
+      if (Array.isArray(saved.palette) && saved.palette.length) state.palette = saved.palette;
+      if (saved.selectedColor) state.selectedColor = saved.selectedColor;
+      state.surfaces = defaultSurfaces(state.ceilFt);
+      if (Array.isArray(saved.surfaces)) {
+        const ov = Object.fromEntries(saved.surfaces.map(s => [s.id, s]));
+        state.surfaces = state.surfaces.map(s => {
+          const o = ov[s.id];
+          if (!o) return s;
+          const m = { ...s };
+          if (typeof o.widthIn === 'number') m.widthIn = o.widthIn;
+          if (typeof o.heightIn === 'number') m.heightIn = o.heightIn;
+          return m;
+        });
+      }
+      const prev = {};
+      if (saved.tiles) {
+        for (const [id, obj] of Object.entries(saved.tiles)) prev[id] = new Map(Object.entries(obj));
+      }
+      state.tiles = initTiles(state.surfaces, prev);
+    } else {
+      state.surfaces = defaultSurfaces(state.ceilFt);
+      state.tiles = initTiles(state.surfaces);
+    }
+  })();
 
   const $ = (s) => document.querySelector(s);
   const canvas = $('#canvas');
   const swatchesEl = $('#swatches');
   const countsEl = $('#counts');
   const totalEl = $('#total');
+  const fullCutTotalEl = $('#full-cut-total');
+  const orderTotalEl = $('#order-total');
   const ceilInput = $('#ceil');
   ceilInput.value = state.ceilFt;
-
-  function areaFt2(cols, rows) {
-    return (cols * rows * SQ_IN_PER_TILE) / 144;
-  }
 
   function renderSwatches() {
     swatchesEl.innerHTML = '';
@@ -524,82 +652,184 @@
     swatchesEl.appendChild(add);
   }
 
+  function computeSurfaceStats(s) {
+    const grid = getGrid(s);
+    const total = grid.cols * grid.rows;
+    const full = grid.fullCols * grid.fullRows;
+    const cut = total - full;
+    const areaFt2 = (s.widthIn * s.heightIn) / 144;
+    return { grid, total, full, cut, areaFt2 };
+  }
+
+  function renderSurface(s) {
+    const stats = computeSurfaceStats(s);
+    const { grid } = stats;
+
+    const surf = document.createElement('div');
+    surf.className = 'surface';
+    surf.dataset.surfaceId = s.id;
+
+    const head = document.createElement('div');
+    head.className = 'surface-head';
+
+    const nameLine = document.createElement('div');
+    nameLine.className = 'surface-name';
+    nameLine.textContent = s.name;
+    head.appendChild(nameLine);
+
+    const meta = document.createElement('div');
+    meta.className = 'surface-meta';
+    const countStr = stats.cut
+      ? `${stats.full} full + ${stats.cut} cut = ${stats.total}`
+      : `${stats.full} tiles`;
+    meta.textContent = `${countStr} · ${stats.areaFt2.toFixed(1)} ft² · ${s.note || ''}`;
+    head.appendChild(meta);
+
+    const dimRow = document.createElement('div');
+    dimRow.className = 'dim-row';
+    const wLbl = document.createElement('span'); wLbl.textContent = 'W';
+    const wIn = document.createElement('input');
+    wIn.type = 'text';
+    wIn.className = 'dim-input';
+    wIn.value = formatDim(s.widthIn);
+    wIn.addEventListener('change', () => {
+      const v = parseDim(wIn.value);
+      if (!isFinite(v) || v <= 0) { wIn.value = formatDim(s.widthIn); return; }
+      s.widthIn = v;
+      rerenderSurface(s.id);
+    });
+    const sep = document.createElement('span'); sep.className = 'dim-sep'; sep.textContent = '×';
+    const hLbl = document.createElement('span'); hLbl.textContent = 'H';
+    const hIn = document.createElement('input');
+    hIn.type = 'text';
+    hIn.className = 'dim-input';
+    hIn.value = formatDim(s.heightIn);
+    if (s.heightLocked) {
+      hIn.disabled = true;
+      hIn.title = 'Linked to ceiling height';
+    }
+    hIn.addEventListener('change', () => {
+      const v = parseDim(hIn.value);
+      if (!isFinite(v) || v <= 0) { hIn.value = formatDim(s.heightIn); return; }
+      s.heightIn = v;
+      rerenderSurface(s.id);
+    });
+    dimRow.append(wLbl, wIn, sep, hLbl, hIn);
+    head.appendChild(dimRow);
+
+    surf.appendChild(head);
+
+    const gridEl = buildGridElement(s, grid);
+    surf.appendChild(gridEl);
+
+    return surf;
+  }
+
+  function buildGridElement(s, grid) {
+    const gridEl = document.createElement('div');
+    gridEl.className = 'grid';
+    gridEl.dataset.surfaceId = s.id;
+    gridEl.style.gridTemplateColumns = grid.colSizes.map(v => v + 'px').join(' ');
+    gridEl.style.gridTemplateRows = grid.rowSizes.map(v => v + 'px').join(' ');
+    const tilesMap = state.tiles[s.id] || new Map();
+    for (let r = 0; r < grid.rows; r++) {
+      for (let c = 0; c < grid.cols; c++) {
+        const t = document.createElement('div');
+        t.className = 'tile';
+        if (isCutCell(grid, r, c)) t.classList.add('cut');
+        t.dataset.surfaceId = s.id;
+        t.dataset.r = r;
+        t.dataset.c = c;
+        const color = tilesMap.get(cellKey(r, c));
+        if (color) t.style.background = color;
+        gridEl.appendChild(t);
+      }
+    }
+    return gridEl;
+  }
+
+  function rerenderSurface(surfaceId) {
+    const s = state.surfaces.find(x => x.id === surfaceId);
+    if (!s) return;
+    const existing = canvas.querySelector(`.surface[data-surface-id="${surfaceId}"]`);
+    const replacement = renderSurface(s);
+    if (existing && existing.parentNode) existing.parentNode.replaceChild(replacement, existing);
+    renderCounts();
+    persist();
+  }
+
   function renderCanvas() {
     canvas.innerHTML = '';
+    const groupOrder = ['Floors', 'Ceiling', 'Walls'];
     const groups = new Map();
+    for (const g of groupOrder) groups.set(g, []);
     for (const s of state.surfaces) {
       if (!groups.has(s.group)) groups.set(s.group, []);
       groups.get(s.group).push(s);
     }
     for (const [gname, gsurf] of groups) {
+      if (!gsurf.length) continue;
       const gEl = document.createElement('div');
       gEl.className = 'group';
       const head = document.createElement('div');
       head.className = 'group-head';
-      head.innerHTML = `<span class="group-title">${gname}</span><span class="group-rule"></span>`;
+      head.innerHTML = `<span class="group-title">${gname}${gname === 'Walls' ? ' · ' + state.ceilFt + "' ceiling" : ''}</span><span class="group-rule"></span>`;
       gEl.appendChild(head);
       const surfs = document.createElement('div');
       surfs.className = 'surfaces';
-      for (const s of gsurf) {
-        const area = areaFt2(s.cols, s.rows).toFixed(1);
-        const surf = document.createElement('div');
-        surf.className = 'surface';
-        surf.innerHTML = `
-          <div>
-            <div class="surface-name">${s.name}</div>
-            <div class="surface-meta">${s.cols}×${s.rows} · ${s.cols * s.rows} tiles · ${area} ft² · ${s.dims}</div>
-          </div>
-        `;
-        const grid = document.createElement('div');
-        grid.className = 'grid';
-        grid.style.gridTemplateColumns = `repeat(${s.cols}, ${TILE_PX}px)`;
-        grid.style.gridTemplateRows = `repeat(${s.rows}, ${TILE_PX}px)`;
-        for (let i = 0; i < s.cols * s.rows; i++) {
-          const t = document.createElement('div');
-          t.className = 'tile';
-          t.dataset.surfaceId = s.id;
-          t.dataset.idx = i;
-          const c = state.tiles[s.id][i];
-          if (c) t.style.background = c;
-          grid.appendChild(t);
-        }
-        surf.appendChild(grid);
-        surfs.appendChild(surf);
-      }
+      for (const s of gsurf) surfs.appendChild(renderSurface(s));
       gEl.appendChild(surfs);
       canvas.appendChild(gEl);
     }
   }
 
   function renderCounts() {
-    const counts = new Map();
-    let total = 0;
+    const byColor = new Map();
+    const byColorCut = new Map();
+    let totalPaintedFull = 0;
+    let totalPaintedCut = 0;
     for (const s of state.surfaces) {
-      for (const c of state.tiles[s.id]) {
-        total++;
-        if (c) counts.set(c, (counts.get(c) || 0) + 1);
+      const grid = getGrid(s);
+      const map = state.tiles[s.id] || new Map();
+      for (const [k, color] of map) {
+        if (!color) continue;
+        const [r, c] = k.split(',').map(Number);
+        if (r >= grid.rows || c >= grid.cols) continue; // stale outside current grid
+        const cut = isCutCell(grid, r, c);
+        byColor.set(color, (byColor.get(color) || 0) + 1);
+        if (cut) {
+          byColorCut.set(color, (byColorCut.get(color) || 0) + 1);
+          totalPaintedCut++;
+        } else {
+          totalPaintedFull++;
+        }
       }
     }
     countsEl.innerHTML = '';
-    if (counts.size === 0) {
+    if (byColor.size === 0) {
       const d = document.createElement('div');
       d.className = 'count-empty';
       d.textContent = 'No tiles painted yet.';
       countsEl.appendChild(d);
     } else {
-      const sorted = [...counts.entries()].sort((a, b) => b[1] - a[1]);
+      const sorted = [...byColor.entries()].sort((a, b) => b[1] - a[1]);
       for (const [color, n] of sorted) {
+        const cutN = byColorCut.get(color) || 0;
+        const fullN = n - cutN;
         const row = document.createElement('div');
         row.className = 'count-row';
         row.innerHTML = `
           <span class="count-chip" style="background:${color}"></span>
-          <span class="count-label">${color}</span>
+          <span class="count-label">${color}${cutN ? ` <span style="opacity:.6">(${fullN}+${cutN}c)</span>` : ''}</span>
           <span class="count-num">${n.toLocaleString()}</span>
         `;
         countsEl.appendChild(row);
       }
     }
-    totalEl.textContent = total.toLocaleString();
+    const totalPainted = totalPaintedFull + totalPaintedCut;
+    totalEl.textContent = totalPainted.toLocaleString();
+    fullCutTotalEl.textContent = `${totalPaintedFull.toLocaleString()} · ${totalPaintedCut.toLocaleString()}`;
+    orderTotalEl.textContent = totalPainted ? Math.ceil(totalPainted * 1.10).toLocaleString() : '—';
   }
 
   function effectiveTool(e) {
@@ -608,25 +838,32 @@
     return state.tool;
   }
 
-  function setTile(surfaceId, idx, color) {
-    state.tiles[surfaceId][idx] = color;
-    const el = canvas.querySelector(`.tile[data-surface-id="${surfaceId}"][data-idx="${idx}"]`);
+  function setTile(surfaceId, r, c, color) {
+    const map = state.tiles[surfaceId] || (state.tiles[surfaceId] = new Map());
+    if (color == null) map.delete(cellKey(r, c));
+    else map.set(cellKey(r, c), color);
+    const el = canvas.querySelector(`.tile[data-surface-id="${surfaceId}"][data-r="${r}"][data-c="${c}"]`);
     if (el) el.style.background = color || '';
   }
 
   function tileFromEvent(e) {
     const el = e.target.closest('.tile');
     if (!el) return null;
-    return { surfaceId: el.dataset.surfaceId, idx: +el.dataset.idx };
+    return {
+      surfaceId: el.dataset.surfaceId,
+      r: +el.dataset.r,
+      c: +el.dataset.c,
+    };
   }
 
   function apply(target, e) {
     if (!target) return;
     const tool = effectiveTool(e);
-    if (tool === 'paint') setTile(target.surfaceId, target.idx, state.selectedColor);
-    else if (tool === 'erase') setTile(target.surfaceId, target.idx, null);
+    if (tool === 'paint') setTile(target.surfaceId, target.r, target.c, state.selectedColor);
+    else if (tool === 'erase') setTile(target.surfaceId, target.r, target.c, null);
     else if (tool === 'eyedrop') {
-      const c = state.tiles[target.surfaceId][target.idx];
+      const map = state.tiles[target.surfaceId];
+      const c = map && map.get(cellKey(target.r, target.c));
       if (c) {
         state.selectedColor = c;
         if (!state.palette.includes(c)) state.palette.push(c);
@@ -638,6 +875,7 @@
   let painting = false;
   canvas.addEventListener('mousedown', (e) => {
     if (e.button !== 0) return;
+    if (e.target.closest('input')) return;
     e.preventDefault();
     const t = tileFromEvent(e);
     if (!t) return;
@@ -669,25 +907,25 @@
 
   ceilInput.addEventListener('change', () => {
     const v = parseFloat(ceilInput.value);
-    if (!isFinite(v) || v < 4 || v > 20) {
-      ceilInput.value = state.ceilFt;
-      return;
-    }
+    if (!isFinite(v) || v < 4 || v > 20) { ceilInput.value = state.ceilFt; return; }
     state.ceilFt = v;
-    const prev = state.tiles;
-    state.surfaces = buildSurfaces(v);
-    state.tiles = initTiles(state.surfaces, prev);
+    const ceilIn = v * 12;
+    for (const s of state.surfaces) if (s.heightLocked) s.heightIn = ceilIn;
     renderCanvas();
     renderCounts();
     persist();
   });
 
   $('#save').addEventListener('click', () => {
+    const tilesOut = {};
+    for (const [k, m] of Object.entries(state.tiles)) tilesOut[k] = Object.fromEntries(m);
     const data = {
+      version: 2,
       ceilFt: state.ceilFt,
       palette: state.palette,
       selectedColor: state.selectedColor,
-      tiles: state.tiles,
+      surfaces: state.surfaces.map(s => ({ id: s.id, widthIn: s.widthIn, heightIn: s.heightIn })),
+      tiles: tilesOut,
     };
     const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
     const a = document.createElement('a');
@@ -711,8 +949,21 @@
           if (typeof d.ceilFt === 'number') state.ceilFt = d.ceilFt;
           if (Array.isArray(d.palette) && d.palette.length) state.palette = d.palette;
           if (d.selectedColor) state.selectedColor = d.selectedColor;
-          state.surfaces = buildSurfaces(state.ceilFt);
-          state.tiles = initTiles(state.surfaces, d.tiles || {});
+          state.surfaces = defaultSurfaces(state.ceilFt);
+          if (Array.isArray(d.surfaces)) {
+            const ov = Object.fromEntries(d.surfaces.map(s => [s.id, s]));
+            state.surfaces = state.surfaces.map(s => {
+              const o = ov[s.id];
+              if (!o) return s;
+              const m = { ...s };
+              if (typeof o.widthIn === 'number') m.widthIn = o.widthIn;
+              if (typeof o.heightIn === 'number') m.heightIn = o.heightIn;
+              return m;
+            });
+          }
+          const prev = {};
+          if (d.tiles) for (const [id, obj] of Object.entries(d.tiles)) prev[id] = new Map(Object.entries(obj));
+          state.tiles = initTiles(state.surfaces, prev);
           ceilInput.value = state.ceilFt;
           renderSwatches();
           renderCanvas();
