@@ -1,4 +1,4 @@
-import { getGrid, isCutCell, type Grid } from './grid';
+import { getGrid, isCutCell, type Grid, type SurfaceDims } from './grid';
 import type { Surface } from './state';
 
 export interface SurfaceStats {
@@ -9,7 +9,7 @@ export interface SurfaceStats {
   areaFt2: number;
 }
 
-export function computeSurfaceStats(s: Pick<Surface, 'widthIn' | 'heightIn'>): SurfaceStats {
+export function computeSurfaceStats(s: SurfaceDims): SurfaceStats {
   const grid = getGrid(s);
   const total = grid.cols * grid.rows;
   const full = grid.fullCols * grid.fullRows;
@@ -44,7 +44,8 @@ export function computeTotals(
       const [rStr, cStr] = k.split(',');
       const r = Number(rStr);
       const c = Number(cStr);
-      if (r >= grid.rows || c >= grid.cols) continue;
+      if (!Number.isFinite(r) || !Number.isFinite(c)) continue;
+      if (r < 0 || c < 0 || r >= grid.rows || c >= grid.cols) continue;
       byColor.set(color, (byColor.get(color) ?? 0) + 1);
       if (isCutCell(grid, r, c)) {
         byColorCut.set(color, (byColorCut.get(color) ?? 0) + 1);
@@ -55,6 +56,6 @@ export function computeTotals(
     }
   }
   const totalPainted = totalPaintedFull + totalPaintedCut;
-  const order = totalPainted ? Math.ceil(totalPainted * 1.1) : 0;
+  const order = Math.ceil(totalPainted * 1.1);
   return { byColor, byColorCut, totalPaintedFull, totalPaintedCut, totalPainted, order };
 }

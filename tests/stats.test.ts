@@ -17,6 +17,13 @@ describe('computeSurfaceStats', () => {
     expect(stats.total).toBe(15);
     expect(stats.cut).toBe(3);
   });
+
+  it('fractional row: adds a cut row', () => {
+    const stats = computeSurfaceStats({ widthIn: TILE_INCH * 4, heightIn: TILE_INCH * 3 + 2 });
+    expect(stats.full).toBe(12);
+    expect(stats.total).toBe(16);
+    expect(stats.cut).toBe(4);
+  });
 });
 
 describe('computeTotals', () => {
@@ -48,5 +55,40 @@ describe('computeTotals', () => {
     const t = computeTotals([surface], tiles);
     expect(t.totalPaintedFull).toBe(0);
     expect(t.totalPaintedCut).toBe(0);
+  });
+
+  it('returns zeros and empty maps for empty tiles', () => {
+    const t = computeTotals([surface], {});
+    expect(t.totalPainted).toBe(0);
+    expect(t.totalPaintedFull).toBe(0);
+    expect(t.totalPaintedCut).toBe(0);
+    expect(t.byColor.size).toBe(0);
+    expect(t.byColorCut.size).toBe(0);
+    expect(t.order).toBe(0);
+  });
+
+  it('returns zeros for empty surfaces', () => {
+    const t = computeTotals([], { x: new Map([['0,0', '#000']]) });
+    expect(t.totalPainted).toBe(0);
+    expect(t.byColor.size).toBe(0);
+  });
+
+  it('aggregates across multiple surfaces', () => {
+    const s1 = { ...surface, id: 's1' };
+    const s2 = { ...surface, id: 's2' };
+    const tiles = {
+      s1: new Map([['0,0', '#000'], ['0,1', '#fff']]),
+      s2: new Map([['0,0', '#000']]),
+    };
+    const t = computeTotals([s1, s2], tiles);
+    expect(t.byColor.get('#000')).toBe(2);
+    expect(t.byColor.get('#fff')).toBe(1);
+    expect(t.totalPainted).toBe(3);
+  });
+
+  it('ignores malformed cell keys', () => {
+    const tiles = { x: new Map([['not-a-key', '#000'], ['', '#000'], ['-1,-1', '#000']]) };
+    const t = computeTotals([surface], tiles);
+    expect(t.totalPainted).toBe(0);
   });
 });
