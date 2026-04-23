@@ -141,7 +141,7 @@ function buildGridElement(s: Surface, grid: ReturnType<typeof getGrid>, state: S
   return gridEl;
 }
 
-export function rerenderSurface(surfaceId: string, state: State, canvas: HTMLElement, cb: SurfaceCallbacks): void {
+function rerenderSurface(surfaceId: string, state: State, canvas: HTMLElement, cb: SurfaceCallbacks): void {
   const s = state.surfaces.find(x => x.id === surfaceId);
   if (!s) return;
   const existing = canvas.querySelector<HTMLElement>(`.surface[data-surface-id="${surfaceId}"]`);
