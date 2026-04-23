@@ -1,23 +1,33 @@
-import { getGrid, cellKey, TILE_PX } from '@/core/grid';
+import { getGrid, cellKey, TILE_PX, TILE_INCH } from '@/core/grid';
 import type { State, Surface } from '@/core/state';
 
 const PX_PER_INCH_3D = 3;
-const TILE_INCH_LOCAL = 7.87;
-const TILE_PX_3D = TILE_INCH_LOCAL * PX_PER_INCH_3D;
+const TILE_PX_3D = TILE_INCH * PX_PER_INCH_3D;
+const ORBIT_AC_KEY = '__orbitAC__';
+
+interface ContainerWithAC extends HTMLElement {
+  [ORBIT_AC_KEY]?: AbortController;
+}
 
 export function render3D(container: HTMLElement, state: State, onChange: () => void): void {
+  // Abort previous orbit listeners before tearing down the old scene.
+  const c = container as ContainerWithAC;
+  c[ORBIT_AC_KEY]?.abort();
   container.innerHTML = '';
 
-  const getSurface = (id: string): Surface | undefined =>
-    state.surfaces.find(s => s.id === id);
+  const need = (id: string): Surface => {
+    const s = state.surfaces.find(x => x.id === id);
+    if (!s) throw new Error(`preview3d: missing surface '${id}'`);
+    return s;
+  };
 
-  const main = getSurface('main')!;
-  const shower = getSurface('shower')!;
-  const ceiling = getSurface('ceiling')!;
-  const wallN = getSurface('wallN')!;
-  const wallS = getSurface('wallS')!;
-  const wallE = getSurface('wallE')!;
-  const wallW = getSurface('wallW')!;
+  const main = need('main');
+  const shower = need('shower');
+  const ceiling = need('ceiling');
+  const wallN = need('wallN');
+  const wallS = need('wallS');
+  const wallE = need('wallE');
+  const wallW = need('wallW');
 
   const roomWin = ceiling.widthIn;
   const roomDin = ceiling.heightIn;
@@ -58,10 +68,10 @@ export function render3D(container: HTMLElement, state: State, onChange: () => v
 
     const tilesMap = state.tiles[s.id] ?? new Map<string, string>();
     for (let r = 0; r < g.rows; r++) {
-      for (let c = 0; c < g.cols; c++) {
+      for (let col = 0; col < g.cols; col++) {
         const t = document.createElement('div');
         t.className = 'tile-3d';
-        const color = tilesMap.get(cellKey(r, c));
+        const color = tilesMap.get(cellKey(r, col));
         if (color) t.style.background = color;
         grid.appendChild(t);
       }
@@ -70,6 +80,7 @@ export function render3D(container: HTMLElement, state: State, onChange: () => v
     return face;
   };
 
+  // applyOrbit closes over roomW/H/D captured at render time; any dim change must trigger re-render.
   const applyOrbit = (): void => {
     const { rotX, rotY } = state.orbit;
     world.style.transform =
@@ -107,6 +118,11 @@ export function render3D(container: HTMLElement, state: State, onChange: () => v
   });
   scene.appendChild(reset);
 
+  // Fresh AbortController per render; aborted by the next render3D call.
+  const ac = new AbortController();
+  c[ORBIT_AC_KEY] = ac;
+  const { signal } = ac;
+
   let dragging = false;
   let lastX = 0, lastY = 0;
   scene.addEventListener('mousedown', (e) => {
@@ -125,10 +141,10 @@ export function render3D(container: HTMLElement, state: State, onChange: () => v
     state.orbit.rotY += dx * 0.5;
     state.orbit.rotX = Math.max(-80, Math.min(10, state.orbit.rotX - dy * 0.4));
     applyOrbit();
-  });
+  }, { signal });
   window.addEventListener('mouseup', () => {
     if (dragging) { dragging = false; onChange(); }
-  });
+  }, { signal });
 
   container.appendChild(scene);
 }

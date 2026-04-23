@@ -4,7 +4,7 @@ import './styles/canvas.css';
 import './styles/preview3d.css';
 
 import { mountLayout } from './ui/layout';
-import { initialState, defaultSurfaces, initTiles } from './core/state';
+import { initialState, initTiles, type ViewMode } from './core/state';
 import { loadSaved, persist, applySaved, type SavedShape } from './storage/local';
 import { renderSwatches } from './ui/swatches';
 import { wireToolButtons } from './ui/tools';
@@ -113,7 +113,7 @@ refs.resetBtn.addEventListener('click', () => {
   persist(state);
 });
 
-function setViewMode(mode: '2d' | '3d'): void {
+function setViewMode(mode: ViewMode): void {
   state.viewMode = mode;
   refs.viewToggleButtons.forEach(b => b.classList.toggle('active', b.dataset.view === mode));
   if (mode === '3d') {
@@ -127,8 +127,16 @@ function setViewMode(mode: '2d' | '3d'): void {
   persist(state);
 }
 
+const VALID_VIEW_MODES: readonly ViewMode[] = ['2d', '3d'];
+function isViewMode(v: string | undefined): v is ViewMode {
+  return v !== undefined && (VALID_VIEW_MODES as readonly string[]).includes(v);
+}
+
 refs.viewToggleButtons.forEach((b) => {
-  b.addEventListener('click', () => setViewMode(b.dataset.view as '2d' | '3d'));
+  b.addEventListener('click', () => {
+    const v = b.dataset.view;
+    if (isViewMode(v)) setViewMode(v);
+  });
 });
 
 setViewMode(state.viewMode);
