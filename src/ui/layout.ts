@@ -1,7 +1,7 @@
 export interface LayoutRefs {
   ceilInput: HTMLInputElement;
   swatchesEl: HTMLElement;
-  toolButtons: NodeListOf<HTMLButtonElement>;
+  toolButtons: HTMLButtonElement[];
   countsEl: HTMLElement;
   totalEl: HTMLElement;
   fullCutTotalEl: HTMLElement;
@@ -9,7 +9,7 @@ export interface LayoutRefs {
   saveBtn: HTMLButtonElement;
   loadBtn: HTMLButtonElement;
   resetBtn: HTMLButtonElement;
-  viewToggleButtons: NodeListOf<HTMLButtonElement>;
+  viewToggleButtons: HTMLButtonElement[];
   canvas2d: HTMLElement;
   canvas3d: HTMLElement;
 }
@@ -79,7 +79,7 @@ export function mountLayout(root: HTMLElement): LayoutRefs {
   return {
     ceilInput: q<HTMLInputElement>('#ceil'),
     swatchesEl: q('#swatches'),
-    toolButtons: root.querySelectorAll<HTMLButtonElement>('.tool-btn'),
+    toolButtons: Array.from(root.querySelectorAll<HTMLButtonElement>('.tool-btn')),
     countsEl: q('#counts'),
     totalEl: q('#total'),
     fullCutTotalEl: q('#full-cut-total'),
@@ -87,7 +87,7 @@ export function mountLayout(root: HTMLElement): LayoutRefs {
     saveBtn: q<HTMLButtonElement>('#save'),
     loadBtn: q<HTMLButtonElement>('#load'),
     resetBtn: q<HTMLButtonElement>('#reset'),
-    viewToggleButtons: root.querySelectorAll<HTMLButtonElement>('#view-toggle button'),
+    viewToggleButtons: Array.from(root.querySelectorAll<HTMLButtonElement>('#view-toggle button')),
     canvas2d: q('#canvas'),
     canvas3d: q('#canvas-3d'),
   };
