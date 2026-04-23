@@ -33,6 +33,7 @@ describe('computeTotals', () => {
     name: 'x',
     widthIn: TILE_INCH * 4 + 2,
     heightIn: TILE_INCH * 3,
+    tileId: 'x',
   };
 
   it('counts painted tiles grouped by color; splits full vs cut', () => {

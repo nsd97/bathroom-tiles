@@ -6,9 +6,6 @@ export interface LayoutRefs {
   totalEl: HTMLElement;
   fullCutTotalEl: HTMLElement;
   orderTotalEl: HTMLElement;
-  saveBtn: HTMLButtonElement;
-  loadBtn: HTMLButtonElement;
-  resetBtn: HTMLButtonElement;
   viewToggleButtons: HTMLButtonElement[];
   canvas2d: HTMLElement;
   canvas3d: HTMLElement;
@@ -47,14 +44,6 @@ export function mountLayout(root: HTMLElement): LayoutRefs {
         <div class="count-sub"><span>Full \u00b7 cut</span><span id="full-cut-total">\u2014</span></div>
         <div class="count-sub"><span>Order (+10% waste)</span><span id="order-total">\u2014</span></div>
       </section>
-      <section>
-        <h2>File</h2>
-        <div class="io-row">
-          <button class="io-btn" id="save">Save</button>
-          <button class="io-btn" id="load">Load</button>
-          <button class="io-btn" id="reset">Reset</button>
-        </div>
-      </section>
     </aside>
     <main>
       <div class="canvas-header">
@@ -84,9 +73,6 @@ export function mountLayout(root: HTMLElement): LayoutRefs {
     totalEl: q('#total'),
     fullCutTotalEl: q('#full-cut-total'),
     orderTotalEl: q('#order-total'),
-    saveBtn: q<HTMLButtonElement>('#save'),
-    loadBtn: q<HTMLButtonElement>('#load'),
-    resetBtn: q<HTMLButtonElement>('#reset'),
     viewToggleButtons: Array.from(root.querySelectorAll<HTMLButtonElement>('#view-toggle button')),
     canvas2d: q('#canvas'),
     canvas3d: q('#canvas-3d'),
