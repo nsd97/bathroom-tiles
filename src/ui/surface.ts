@@ -7,7 +7,31 @@ import { effectiveTool } from './tools';
 export interface SurfaceCallbacks {
   onRerenderCounts: () => void;
   onRenderSwatches: () => void;
+  /**
+   * Fallback "something changed, save it" hook. Called from dim-input /
+   * stroke-end code paths when the newer per-action commit hooks below are
+   * NOT supplied. The Supabase-wired app in main.ts passes the newer hooks
+   * and leaves persist as a no-op; older/tests may still use it.
+   */
   persist: () => void;
+  /**
+   * Commit the net result of a drag-paint stroke as a single batch per
+   * surface. Called on mouseup. `paints` maps surfaceId → (cellKey → color);
+   * `erases` maps surfaceId → Set<cellKey>. Wiring this lets the caller push
+   * one round-trip per stroke rather than one per cell. When omitted,
+   * `persist()` is invoked instead.
+   */
+  onStrokeCommit?: (
+    paints: Map<string, Map<string, string>>,
+    erases: Map<string, Set<string>>,
+  ) => void;
+  /**
+   * Fired once per surface whose widthIn/heightIn just changed via the dim
+   * inputs. The Surface object is already mutated in place; the callback
+   * should push the new dims to persistence (and seed any echo key). When
+   * omitted, `persist()` is invoked instead.
+   */
+  onSurfaceDimsCommit?: (surfaceId: string) => void;
 }
 
 export function renderCanvas(canvas: HTMLElement, state: State, cb: SurfaceCallbacks): void {
@@ -117,14 +141,15 @@ function buildGridElement(s: Surface, grid: ReturnType<typeof getGrid>, state: S
   return gridEl;
 }
 
-function rerenderSurface(surfaceId: string, state: State, canvas: HTMLElement, cb: SurfaceCallbacks): void {
+export function rerenderSurface(surfaceId: string, state: State, canvas: HTMLElement, cb: SurfaceCallbacks): void {
   const s = state.surfaces.find(x => x.id === surfaceId);
   if (!s) return;
   const existing = canvas.querySelector<HTMLElement>(`.surface[data-surface-id="${surfaceId}"]`);
   const replacement = renderSurface(s, state, canvas, cb);
   if (existing?.parentNode) existing.parentNode.replaceChild(replacement, existing);
   cb.onRerenderCounts();
-  cb.persist();
+  if (cb.onSurfaceDimsCommit) cb.onSurfaceDimsCommit(surfaceId);
+  else cb.persist();
 }
 
 interface TileTarget { surfaceId: string; r: number; c: number; }
@@ -153,14 +178,55 @@ function setTile(state: State, canvas: HTMLElement, surfaceId: string, r: number
   if (el) el.style.background = color ?? '';
 }
 
-function apply(state: State, canvas: HTMLElement, target: TileTarget | null, e: MouseEvent, cb: SurfaceCallbacks): void {
+interface Stroke {
+  paints: Map<string, Map<string, string>>; // surfaceId -> cellKey -> color
+  erases: Map<string, Set<string>>;         // surfaceId -> Set<cellKey>
+}
+
+function emptyStroke(): Stroke {
+  return { paints: new Map(), erases: new Map() };
+}
+
+/**
+ * Record a net cell change from the active stroke. Later writes within the
+ * same stroke overwrite earlier ones for the same (surface, cell), so the
+ * map reflects the final intent on mouseup.
+ */
+function recordStroke(stroke: Stroke, surfaceId: string, key: string, color: string | null): void {
+  if (color == null) {
+    // Erase wins; remove any pending paint for this cell, record erase.
+    stroke.paints.get(surfaceId)?.delete(key);
+    let set = stroke.erases.get(surfaceId);
+    if (!set) { set = new Set(); stroke.erases.set(surfaceId, set); }
+    set.add(key);
+  } else {
+    stroke.erases.get(surfaceId)?.delete(key);
+    let m = stroke.paints.get(surfaceId);
+    if (!m) { m = new Map(); stroke.paints.set(surfaceId, m); }
+    m.set(key, color);
+  }
+}
+
+function apply(
+  state: State,
+  canvas: HTMLElement,
+  target: TileTarget | null,
+  e: MouseEvent,
+  cb: SurfaceCallbacks,
+  stroke: Stroke,
+): void {
   if (!target) return;
   const tool = effectiveTool(state, e);
-  if (tool === 'paint') setTile(state, canvas, target.surfaceId, target.r, target.c, state.selectedColor);
-  else if (tool === 'erase') setTile(state, canvas, target.surfaceId, target.r, target.c, null);
-  else {
+  const key = cellKey(target.r, target.c);
+  if (tool === 'paint') {
+    setTile(state, canvas, target.surfaceId, target.r, target.c, state.selectedColor);
+    recordStroke(stroke, target.surfaceId, key, state.selectedColor);
+  } else if (tool === 'erase') {
+    setTile(state, canvas, target.surfaceId, target.r, target.c, null);
+    recordStroke(stroke, target.surfaceId, key, null);
+  } else {
     const map = state.tiles[target.surfaceId];
-    const c = map?.get(cellKey(target.r, target.c));
+    const c = map?.get(key);
     if (c) {
       state.selectedColor = c;
       if (!state.palette.includes(c)) state.palette.push(c);
@@ -171,6 +237,7 @@ function apply(state: State, canvas: HTMLElement, target: TileTarget | null, e: 
 
 export function wireCanvasPainting(canvas: HTMLElement, state: State, cb: SurfaceCallbacks): void {
   let painting = false;
+  let stroke: Stroke = emptyStroke();
   canvas.addEventListener('mousedown', (e) => {
     if (e.button !== 0) return;
     const target = e.target as HTMLElement | null;
@@ -179,21 +246,30 @@ export function wireCanvasPainting(canvas: HTMLElement, state: State, cb: Surfac
     const t = tileFromEvent(e);
     if (!t) return;
     painting = true;
-    apply(state, canvas, t, e, cb);
+    stroke = emptyStroke();
+    apply(state, canvas, t, e, cb, stroke);
     cb.onRerenderCounts();
   });
   canvas.addEventListener('mouseover', (e) => {
     if (!painting) return;
     const t = tileFromEvent(e);
     if (!t) return;
-    apply(state, canvas, t, e, cb);
+    apply(state, canvas, t, e, cb, stroke);
   });
   window.addEventListener('mouseup', () => {
-    if (painting) {
-      painting = false;
-      cb.onRerenderCounts();
+    if (!painting) return;
+    painting = false;
+    cb.onRerenderCounts();
+    if (cb.onStrokeCommit) {
+      // Only fire when the stroke actually touched cells (eyedrop-only strokes
+      // produce empty maps and need no network traffic).
+      if (stroke.paints.size > 0 || stroke.erases.size > 0) {
+        cb.onStrokeCommit(stroke.paints, stroke.erases);
+      }
+    } else {
       cb.persist();
     }
+    stroke = emptyStroke();
   });
   canvas.addEventListener('contextmenu', (e) => e.preventDefault());
 }
