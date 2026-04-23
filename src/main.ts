@@ -5,7 +5,7 @@ import './styles/preview3d.css';
 
 import { mountLayout } from './ui/layout';
 import { initialState, defaultSurfaces, initTiles } from './core/state';
-import { loadSaved, persist, applySaved } from './storage/local';
+import { loadSaved, persist, applySaved, type SavedShape } from './storage/local';
 import { renderSwatches } from './ui/swatches';
 import { wireToolButtons } from './ui/tools';
 import { renderCanvas, wireCanvasPainting } from './ui/surface';
@@ -83,14 +83,18 @@ refs.loadBtn.addEventListener('click', () => {
     const r = new FileReader();
     r.onload = () => {
       try {
-        const d = JSON.parse(String(r.result));
-        applySaved(state, d);
+        const parsed: unknown = JSON.parse(String(r.result));
+        if (!parsed || typeof parsed !== 'object') {
+          throw new Error('file is not a JSON object');
+        }
+        applySaved(state, parsed as SavedShape);
         refs.ceilInput.value = String(state.ceilFt);
         doRenderSwatches();
         renderCanvas(refs.canvas2d, state, surfaceCb);
         doRenderCounts();
         persist(state);
       } catch (err) {
+        console.error('[tile-planner] load failed', err);
         alert('Could not load: ' + (err as Error).message);
       }
     };

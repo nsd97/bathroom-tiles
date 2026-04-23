@@ -133,11 +133,14 @@ function tileFromEvent(e: Event): TileTarget | null {
   const target = e.target as HTMLElement | null;
   const el = target?.closest<HTMLElement>('.tile');
   if (!el) return null;
-  return {
-    surfaceId: el.dataset.surfaceId!,
-    r: Number(el.dataset.r),
-    c: Number(el.dataset.c),
-  };
+  const surfaceId = el.dataset.surfaceId;
+  const rStr = el.dataset.r;
+  const cStr = el.dataset.c;
+  if (!surfaceId || !rStr || !cStr) return null;
+  const r = Number(rStr);
+  const c = Number(cStr);
+  if (!Number.isFinite(r) || !Number.isFinite(c)) return null;
+  return { surfaceId, r, c };
 }
 
 function setTile(state: State, canvas: HTMLElement, surfaceId: string, r: number, c: number, color: string | null): void {

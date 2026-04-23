@@ -23,11 +23,29 @@ export function renderCounts(refs: CountsRefs, state: State): void {
       const fullN = n - cutN;
       const row = document.createElement('div');
       row.className = 'count-row';
-      row.innerHTML = `
-        <span class="count-chip" style="background:${color}"></span>
-        <span class="count-label">${color}${cutN ? ` <span style="opacity:.6">(${fullN}+${cutN}c)</span>` : ''}</span>
-        <span class="count-num">${n.toLocaleString()}</span>
-      `;
+
+      const chip = document.createElement('span');
+      chip.className = 'count-chip';
+      chip.style.backgroundColor = color;
+      row.appendChild(chip);
+
+      const label = document.createElement('span');
+      label.className = 'count-label';
+      label.textContent = color;
+      if (cutN) {
+        const parenthetical = document.createElement('span');
+        parenthetical.style.opacity = '.6';
+        parenthetical.textContent = ` (${fullN}+${cutN}c)`;
+        label.appendChild(document.createTextNode(' '));
+        label.appendChild(parenthetical);
+      }
+      row.appendChild(label);
+
+      const num = document.createElement('span');
+      num.className = 'count-num';
+      num.textContent = n.toLocaleString();
+      row.appendChild(num);
+
       refs.countsEl.appendChild(row);
     }
   }
