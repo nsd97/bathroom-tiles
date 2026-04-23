@@ -5,7 +5,9 @@ import './styles/preview3d.css';
 
 import { mountLayout } from './ui/layout';
 import { initialState } from './core/state';
-import { loadSaved, applySaved } from './storage/local';
+import { loadSaved, applySaved, persist } from './storage/local';
+import { renderSwatches } from './ui/swatches';
+import { wireToolButtons } from './ui/tools';
 
 const root = document.getElementById('app');
 if (!root) throw new Error('missing #app');
@@ -16,4 +18,5 @@ const saved = loadSaved();
 if (saved) applySaved(state, saved);
 refs.ceilInput.value = String(state.ceilFt);
 
-// UI wiring lands in subsequent tasks.
+renderSwatches(refs.swatchesEl, state, { onChange: () => persist(state) });
+wireToolButtons(refs.toolButtons, state);
