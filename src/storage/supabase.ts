@@ -99,3 +99,66 @@ export async function fetchAll(client: SupabaseClient): Promise<LoadedState> {
 
   return { tileLibrary, surfaces, paintedCells, settings, versions };
 }
+
+/** Upsert a single painted cell. */
+export async function paintCell(
+  client: SupabaseClient,
+  surfaceId: string,
+  cellKey: string,
+  color: string,
+): Promise<void> {
+  const { error } = await client
+    .from('painted_cells')
+    .upsert(
+      [{ surface_id: surfaceId, cell_key: cellKey, color }],
+      { onConflict: 'surface_id,cell_key' },
+    );
+  if (error) throw new Error(`paintCell failed: ${error.message}`);
+}
+
+/** Batch-upsert many painted cells in one round-trip. No-op for an empty map. */
+export async function paintCells(
+  client: SupabaseClient,
+  surfaceId: string,
+  cells: Map<string, string>,
+): Promise<void> {
+  if (cells.size === 0) return;
+  const rows = Array.from(cells, ([cell_key, color]) => ({
+    surface_id: surfaceId,
+    cell_key,
+    color,
+  }));
+  const { error } = await client
+    .from('painted_cells')
+    .upsert(rows, { onConflict: 'surface_id,cell_key' });
+  if (error) throw new Error(`paintCells failed: ${error.message}`);
+}
+
+/** Delete a single painted cell by composite key, using chained .eq() filters. */
+export async function eraseCell(
+  client: SupabaseClient,
+  surfaceId: string,
+  cellKey: string,
+): Promise<void> {
+  const { error } = await client
+    .from('painted_cells')
+    .delete()
+    .eq('surface_id', surfaceId)
+    .eq('cell_key', cellKey);
+  if (error) throw new Error(`eraseCell failed: ${error.message}`);
+}
+
+/**
+ * Delete every painted cell belonging to a single surface. Used by the
+ * "switching tile shape clears paint" confirm-flow.
+ */
+export async function eraseSurfacePaint(
+  client: SupabaseClient,
+  surfaceId: string,
+): Promise<void> {
+  const { error } = await client
+    .from('painted_cells')
+    .delete()
+    .eq('surface_id', surfaceId);
+  if (error) throw new Error(`eraseSurfacePaint failed: ${error.message}`);
+}

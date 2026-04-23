@@ -1,5 +1,11 @@
 import { describe, expect, it, vi } from 'vitest';
-import { fetchAll } from '@/storage/supabase';
+import {
+  fetchAll,
+  paintCell,
+  paintCells,
+  eraseCell,
+  eraseSurfacePaint,
+} from '@/storage/supabase';
 
 /**
  * Minimal thenable that resolves to {data, error}. Also exposes a `.order()` chain
@@ -101,5 +107,111 @@ describe('fetchAll', () => {
       },
     } as any;
     await expect(fetchAll(client)).rejects.toThrow(/boom/);
+  });
+});
+
+describe('paintCell', () => {
+  it('upserts one painted_cells row with composite onConflict', async () => {
+    const upsert = vi.fn().mockResolvedValue({ error: null });
+    const from = vi.fn(() => ({ upsert }));
+    const client = { from } as any;
+    await paintCell(client, 'main', '3,5', '#abc');
+    expect(from).toHaveBeenCalledWith('painted_cells');
+    expect(upsert).toHaveBeenCalledWith(
+      [{ surface_id: 'main', cell_key: '3,5', color: '#abc' }],
+      { onConflict: 'surface_id,cell_key' },
+    );
+  });
+
+  it('throws a descriptive error on failure', async () => {
+    const upsert = vi.fn().mockResolvedValue({ error: { message: 'nope' } });
+    const client = { from: () => ({ upsert }) } as any;
+    await expect(paintCell(client, 'main', '3,5', '#abc')).rejects.toThrow(
+      /paintCell failed: nope/,
+    );
+  });
+});
+
+describe('paintCells (batch)', () => {
+  it('upserts multiple rows in one call', async () => {
+    const upsert = vi.fn().mockResolvedValue({ error: null });
+    const client = { from: () => ({ upsert }) } as any;
+    await paintCells(
+      client,
+      'main',
+      new Map([
+        ['0,0', '#fff'],
+        ['0,1', '#000'],
+      ]),
+    );
+    expect(upsert).toHaveBeenCalledTimes(1);
+    const [rows, opts] = upsert.mock.calls[0]!;
+    expect(rows).toEqual([
+      { surface_id: 'main', cell_key: '0,0', color: '#fff' },
+      { surface_id: 'main', cell_key: '0,1', color: '#000' },
+    ]);
+    expect(opts).toEqual({ onConflict: 'surface_id,cell_key' });
+  });
+
+  it('is a no-op for an empty map', async () => {
+    const upsert = vi.fn();
+    const client = { from: () => ({ upsert }) } as any;
+    await paintCells(client, 'main', new Map());
+    expect(upsert).not.toHaveBeenCalled();
+  });
+
+  it('throws a descriptive error on failure', async () => {
+    const upsert = vi.fn().mockResolvedValue({ error: { message: 'bad batch' } });
+    const client = { from: () => ({ upsert }) } as any;
+    await expect(
+      paintCells(client, 'main', new Map([['0,0', '#fff']])),
+    ).rejects.toThrow(/paintCells failed: bad batch/);
+  });
+});
+
+describe('eraseCell', () => {
+  it('deletes a painted_cells row via chained eq() calls', async () => {
+    const eq2 = vi.fn().mockResolvedValue({ error: null });
+    const eq1 = vi.fn(() => ({ eq: eq2 }));
+    const del = vi.fn(() => ({ eq: eq1 }));
+    const from = vi.fn(() => ({ delete: del }));
+    const client = { from } as any;
+    await eraseCell(client, 'main', '3,5');
+    expect(from).toHaveBeenCalledWith('painted_cells');
+    expect(del).toHaveBeenCalled();
+    expect(eq1).toHaveBeenCalledWith('surface_id', 'main');
+    expect(eq2).toHaveBeenCalledWith('cell_key', '3,5');
+  });
+
+  it('throws a descriptive error on failure', async () => {
+    const eq2 = vi.fn().mockResolvedValue({ error: { message: 'del fail' } });
+    const eq1 = vi.fn(() => ({ eq: eq2 }));
+    const del = vi.fn(() => ({ eq: eq1 }));
+    const client = { from: () => ({ delete: del }) } as any;
+    await expect(eraseCell(client, 'main', '3,5')).rejects.toThrow(
+      /eraseCell failed: del fail/,
+    );
+  });
+});
+
+describe('eraseSurfacePaint', () => {
+  it('deletes all painted_cells rows for one surface', async () => {
+    const eq = vi.fn().mockResolvedValue({ error: null });
+    const del = vi.fn(() => ({ eq }));
+    const from = vi.fn(() => ({ delete: del }));
+    const client = { from } as any;
+    await eraseSurfacePaint(client, 'main');
+    expect(from).toHaveBeenCalledWith('painted_cells');
+    expect(del).toHaveBeenCalled();
+    expect(eq).toHaveBeenCalledWith('surface_id', 'main');
+  });
+
+  it('throws a descriptive error on failure', async () => {
+    const eq = vi.fn().mockResolvedValue({ error: { message: 'surface del fail' } });
+    const del = vi.fn(() => ({ eq }));
+    const client = { from: () => ({ delete: del }) } as any;
+    await expect(eraseSurfacePaint(client, 'main')).rejects.toThrow(
+      /eraseSurfacePaint failed: surface del fail/,
+    );
   });
 });
