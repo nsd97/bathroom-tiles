@@ -2,6 +2,7 @@ import './styles/base.css';
 import './styles/sidebar.css';
 import './styles/canvas.css';
 import './styles/preview3d.css';
+import './styles/auth.css';
 
 import { mountLayout } from './ui/layout';
 import { initialState, initTiles, type ViewMode } from './core/state';
