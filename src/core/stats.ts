@@ -1,6 +1,7 @@
 import { getGrid, isCutCell, type Grid, type SurfaceDims } from './grid';
 import type { Surface } from './state';
 import type { Tile } from './tile';
+import { hexesInRect, hexVertices, type HexOpts } from '@/ui/hex-grid';
 
 export interface SurfaceStats {
   /** Present for square tiles only; hex surfaces leave this undefined. */
@@ -13,13 +14,27 @@ export interface SurfaceStats {
 
 export function computeSurfaceStats(s: SurfaceDims, tile: Tile): SurfaceStats {
   const areaFt2 = (s.widthIn * s.heightIn) / 144;
-  // Hex support lands in Task 6.4; for now only square is implemented and the
-  // surface renderer never passes a hex tile here.
-  const grid = getGrid(s, tile.sizeIn);
-  const total = grid.cols * grid.rows;
-  const full = grid.fullCols * grid.fullRows;
+  if (tile.shape === 'square') {
+    const grid = getGrid(s, tile.sizeIn);
+    const total = grid.cols * grid.rows;
+    const full = grid.fullCols * grid.fullRows;
+    const cut = total - full;
+    return { grid, total, full, cut, areaFt2 };
+  }
+  // Hex: enumerate all overlapping hexes; "full" = every vertex inside the rect.
+  const opts: HexOpts = { shape: tile.shape, sizeIn: tile.sizeIn };
+  const list = hexesInRect(s, opts);
+  let full = 0;
+  for (const a of list) {
+    const verts = hexVertices(a, opts);
+    const allInside = verts.every(
+      (v) => v.x >= 0 && v.x <= s.widthIn && v.y >= 0 && v.y <= s.heightIn,
+    );
+    if (allInside) full++;
+  }
+  const total = list.length;
   const cut = total - full;
-  return { grid, total, full, cut, areaFt2 };
+  return { total, full, cut, areaFt2 };
 }
 
 export interface Totals {
@@ -44,22 +59,51 @@ export function computeTotals(
   for (const s of surfaces) {
     const tile = tilesById.get(s.tileId);
     if (!tile) continue;
-    const grid = getGrid(s, tile.sizeIn);
     const map = tiles[s.id];
     if (!map) continue;
-    for (const [k, color] of map) {
-      if (!color) continue;
-      const [rStr, cStr] = k.split(',');
-      const r = Number(rStr);
-      const c = Number(cStr);
-      if (!Number.isFinite(r) || !Number.isFinite(c)) continue;
-      if (r < 0 || c < 0 || r >= grid.rows || c >= grid.cols) continue;
-      byColor.set(color, (byColor.get(color) ?? 0) + 1);
-      if (isCutCell(grid, r, c)) {
-        byColorCut.set(color, (byColorCut.get(color) ?? 0) + 1);
-        totalPaintedCut++;
-      } else {
-        totalPaintedFull++;
+    if (tile.shape === 'square') {
+      const grid = getGrid(s, tile.sizeIn);
+      for (const [k, color] of map) {
+        if (!color) continue;
+        const [rStr, cStr] = k.split(',');
+        const r = Number(rStr);
+        const c = Number(cStr);
+        if (!Number.isFinite(r) || !Number.isFinite(c)) continue;
+        if (r < 0 || c < 0 || r >= grid.rows || c >= grid.cols) continue;
+        byColor.set(color, (byColor.get(color) ?? 0) + 1);
+        if (isCutCell(grid, r, c)) {
+          byColorCut.set(color, (byColorCut.get(color) ?? 0) + 1);
+          totalPaintedCut++;
+        } else {
+          totalPaintedFull++;
+        }
+      }
+    } else {
+      // Hex: cell keys are axial "q,r". A painted hex counts only when it
+      // actually overlaps the surface rect (any vertex inside); it's "cut"
+      // iff at least one of its 6 vertices lies outside the rect.
+      const opts: HexOpts = { shape: tile.shape, sizeIn: tile.sizeIn };
+      for (const [k, color] of map) {
+        if (!color) continue;
+        const [qStr, rStr] = k.split(',');
+        const q = Number(qStr);
+        const r = Number(rStr);
+        if (!Number.isFinite(q) || !Number.isFinite(r)) continue;
+        const verts = hexVertices({ q, r }, opts);
+        const anyInside = verts.some(
+          (v) => v.x >= 0 && v.x <= s.widthIn && v.y >= 0 && v.y <= s.heightIn,
+        );
+        if (!anyInside) continue;
+        const allInside = verts.every(
+          (v) => v.x >= 0 && v.x <= s.widthIn && v.y >= 0 && v.y <= s.heightIn,
+        );
+        byColor.set(color, (byColor.get(color) ?? 0) + 1);
+        if (allInside) {
+          totalPaintedFull++;
+        } else {
+          byColorCut.set(color, (byColorCut.get(color) ?? 0) + 1);
+          totalPaintedCut++;
+        }
       }
     }
   }
