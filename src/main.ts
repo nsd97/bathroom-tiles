@@ -17,6 +17,7 @@ import {
   eraseCell,
   eraseSurfacePaint,
   createTile,
+  deleteTile,
   setSurfaceTile,
   updateSettings,
   updateSurfaceDims,
@@ -204,10 +205,7 @@ async function mountApp(root: HTMLElement): Promise<void> {
       focusedSurfaceTileId: focusedSurface?.tileId ?? null,
       inUseCount: (tileId) => state.surfaces.filter((s) => s.tileId === tileId).length,
       onSelect: (tile) => onSelectTile(tile),
-      onDelete: () => {
-        // Wired in a later commit (Task 5.4).
-        console.info('[tile-library] delete not yet wired');
-      },
+      onDelete: (tile, inUseCount) => onDeleteTile(tile, inUseCount),
       onAddRequested: () => {
         renderNewTileForm(refs.tileLibraryEl, {
           onCancel: () => doRenderTileLibrary(),
@@ -354,6 +352,30 @@ async function mountApp(root: HTMLElement): Promise<void> {
     actions.append(switchBtn, cancelBtn);
     bar.append(msg, actions);
     surfEl.insertBefore(bar, surfEl.firstChild);
+  }
+
+  /**
+   * Delete handler for library rows. The UI only surfaces the × when
+   * `inUseCount === 0`, so reaching this with a non-zero count means a race
+   * between hover and click — we still belt-and-suspenders guard here.
+   */
+  function onDeleteTile(tile: Tile, inUseCount: number): void {
+    if (inUseCount > 0) return;
+    // eslint-disable-next-line no-alert
+    const ok = window.confirm(`Delete tile "${tile.label}"?`);
+    if (!ok) return;
+    const key = `tile:${tile.id}`;
+    pendingKeys.add(key);
+    // Optimistic remove; roll back if the DB rejects (e.g., stale FK).
+    const prev = state.tileLibrary;
+    state.tileLibrary = state.tileLibrary.filter((t) => t.id !== tile.id);
+    doRenderTileLibrary();
+    deleteTile(supabase, tile.id).catch((e: unknown) => {
+      console.warn('[deleteTile]', e);
+      pendingKeys.delete(key);
+      state.tileLibrary = prev;
+      doRenderTileLibrary();
+    });
   }
 
   const rerenderAll = (): void => {
