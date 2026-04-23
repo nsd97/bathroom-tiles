@@ -1,3 +1,4 @@
+// Import from 'vitest/config' (not 'vite') so the `test` key is typed.
 import { defineConfig } from 'vitest/config';
 import { fileURLToPath } from 'node:url';
 
