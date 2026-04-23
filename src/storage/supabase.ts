@@ -1,4 +1,7 @@
-import type { SupabaseClient } from '@supabase/supabase-js';
+import type {
+  RealtimePostgresChangesPayload,
+  SupabaseClient,
+} from '@supabase/supabase-js';
 import type { Surface } from '@/core/state';
 import type { Tile, TileShape } from '@/core/tile';
 
@@ -437,4 +440,191 @@ export async function restoreVersion(
       .upsert(snapshot.paintedCells as unknown as PaintedCellSnapshotRow[]);
     if (cellsRes.error) throw new Error(`restoreVersion failed: ${cellsRes.error.message}`);
   }
+}
+
+// --- Realtime subscription + echo suppression --------------------------------
+
+/**
+ * A change event surfaced to the UI layer. `row` is the new row for
+ * insert/update; for deletes we copy `oldRow` into `row` so that consumers
+ * always have a populated `row` to index into. `oldRow` is present for
+ * update/delete and undefined for insert.
+ */
+export interface Change {
+  kind: 'insert' | 'update' | 'delete';
+  row: Record<string, unknown>;
+  oldRow?: Record<string, unknown>;
+}
+
+/**
+ * Handlers invoked by `subscribeAll` when non-echo realtime events arrive.
+ * `project_settings` is a singleton row that only ever updates, so its
+ * handler takes a simpler shape.
+ */
+export interface ChangeHandlers {
+  onTile: (change: Change) => void;
+  onSurface: (change: Change) => void;
+  onPaintedCell: (change: Change) => void;
+  onSettings: (change: { row: Record<string, unknown> }) => void;
+  onVersion: (change: Change) => void;
+}
+
+/**
+ * Public alias for the Supabase realtime payload we consume. Typed against a
+ * permissive row shape (`Record<string, unknown>`) because each table has a
+ * different schema; callers / dispatcher narrow fields explicitly when reading.
+ */
+export type RealtimePayload = RealtimePostgresChangesPayload<Record<string, unknown>>;
+
+/** Narrow a payload's `new`/`old` (typed as `{}` on some variants) to an index signature. */
+function asRow(v: unknown): Record<string, unknown> {
+  return (v ?? {}) as Record<string, unknown>;
+}
+
+/** Pick a string field out of a row, returning undefined when absent or non-string. */
+function strField(row: Record<string, unknown>, key: string): string | undefined {
+  const v = row[key];
+  return typeof v === 'string' ? v : undefined;
+}
+
+/**
+ * Compute the echo-suppression key that the controller's mutation path seeded
+ * before issuing the write. Returning undefined means "no well-formed key for
+ * this payload" — the dispatcher then treats the event as non-echo.
+ *
+ * Formats (must match those seeded by the controller):
+ *   - tile:<id>
+ *   - surface:<id>
+ *   - painted_cell:<surface_id>:<cell_key>:<color>  (insert/update)
+ *     painted_cell:<surface_id>:<cell_key>          (delete)
+ *   - settings:1
+ *   - version:<id>
+ */
+function computePendingKey(payload: RealtimePayload): string | undefined {
+  const kindTable = payload.table;
+  const newRow = asRow(payload.new);
+  const oldRow = asRow(payload.old);
+  const primary = payload.eventType === 'DELETE' ? oldRow : newRow;
+
+  switch (kindTable) {
+    case 'tiles': {
+      const id = strField(primary, 'id');
+      return id ? `tile:${id}` : undefined;
+    }
+    case 'surfaces': {
+      const id = strField(primary, 'id');
+      return id ? `surface:${id}` : undefined;
+    }
+    case 'painted_cells': {
+      const surfaceId = strField(primary, 'surface_id');
+      const cellKey = strField(primary, 'cell_key');
+      if (!surfaceId || !cellKey) return undefined;
+      if (payload.eventType === 'DELETE') {
+        return `painted_cell:${surfaceId}:${cellKey}`;
+      }
+      const color = strField(primary, 'color');
+      return color ? `painted_cell:${surfaceId}:${cellKey}:${color}` : undefined;
+    }
+    case 'project_settings':
+      return 'settings:1';
+    case 'versions': {
+      const id = strField(primary, 'id');
+      return id ? `version:${id}` : undefined;
+    }
+    default:
+      return undefined;
+  }
+}
+
+/**
+ * Pure dispatcher: given a realtime payload, either suppress (echo of our own
+ * write) or route to the appropriate handler. Exported so tests can exercise
+ * it directly without mocking an entire channel.
+ */
+export function dispatchRealtimeEvent(
+  payload: RealtimePayload,
+  handlers: ChangeHandlers,
+  pendingKeys: Set<string>,
+): void {
+  const key = computePendingKey(payload);
+  if (key && pendingKeys.has(key)) {
+    pendingKeys.delete(key);
+    return;
+  }
+
+  const newRow = asRow(payload.new);
+  const oldRow = asRow(payload.old);
+  const kind =
+    payload.eventType === 'INSERT'
+      ? 'insert'
+      : payload.eventType === 'UPDATE'
+        ? 'update'
+        : payload.eventType === 'DELETE'
+          ? 'delete'
+          : undefined;
+  if (!kind) return;
+
+  const change: Change =
+    kind === 'insert'
+      ? { kind, row: newRow, oldRow: undefined }
+      : kind === 'update'
+        ? { kind, row: newRow, oldRow }
+        : { kind, row: oldRow, oldRow };
+
+  switch (payload.table) {
+    case 'tiles':
+      handlers.onTile(change);
+      return;
+    case 'surfaces':
+      handlers.onSurface(change);
+      return;
+    case 'painted_cells':
+      handlers.onPaintedCell(change);
+      return;
+    case 'project_settings':
+      handlers.onSettings({ row: change.row });
+      return;
+    case 'versions':
+      handlers.onVersion(change);
+      return;
+    default:
+      return;
+  }
+}
+
+/**
+ * Open a single `bathroom-tiles` realtime channel that listens for all
+ * postgres_changes on the five app tables. Returns an unsubscribe function
+ * that removes the channel from the client.
+ *
+ * Echo suppression: the caller shares a `Set<string>` that mutation helpers
+ * seed with a pending key before each write (see `computePendingKey` for the
+ * format). On each event the dispatcher consumes and removes a matching key,
+ * or otherwise invokes the corresponding handler. Supabase's SDK retries on
+ * CHANNEL_ERROR / TIMED_OUT internally, so we do not layer our own retry.
+ */
+export function subscribeAll(
+  client: SupabaseClient,
+  handlers: ChangeHandlers,
+  pendingKeys: Set<string>,
+): () => void {
+  const channel = client.channel('bathroom-tiles');
+  const tables = [
+    'tiles',
+    'surfaces',
+    'painted_cells',
+    'project_settings',
+    'versions',
+  ] as const;
+  for (const table of tables) {
+    channel.on(
+      'postgres_changes',
+      { event: '*', schema: 'public', table },
+      (payload: RealtimePayload) => dispatchRealtimeEvent(payload, handlers, pendingKeys),
+    );
+  }
+  channel.subscribe();
+  return () => {
+    void client.removeChannel(channel);
+  };
 }

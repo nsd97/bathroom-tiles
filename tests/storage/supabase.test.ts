@@ -13,6 +13,10 @@ import {
   saveVersion,
   deleteVersion,
   restoreVersion,
+  dispatchRealtimeEvent,
+  subscribeAll,
+  type ChangeHandlers,
+  type RealtimePayload,
 } from '@/storage/supabase';
 
 /**
@@ -588,5 +592,335 @@ describe('restoreVersion', () => {
     expect(upsertOther).not.toHaveBeenCalled();
     expect(del).not.toHaveBeenCalled();
     expect(deleteNot).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * Build a handlers object where every handler is a vi.fn() spy.
+ * Returning them separately keeps each test's assertions readable.
+ */
+function makeHandlers() {
+  const onTile = vi.fn();
+  const onSurface = vi.fn();
+  const onPaintedCell = vi.fn();
+  const onSettings = vi.fn();
+  const onVersion = vi.fn();
+  const handlers: ChangeHandlers = {
+    onTile,
+    onSurface,
+    onPaintedCell,
+    onSettings,
+    onVersion,
+  };
+  return { handlers, onTile, onSurface, onPaintedCell, onSettings, onVersion };
+}
+
+/** Build a well-formed RealtimePayload for a given table/event/new/old. */
+function mkPayload(
+  table: string,
+  eventType: 'INSERT' | 'UPDATE' | 'DELETE',
+  newRow: Record<string, unknown>,
+  oldRow: Record<string, unknown>,
+): RealtimePayload {
+  return {
+    schema: 'public',
+    table,
+    commit_timestamp: '2026-04-23T00:00:00Z',
+    errors: [],
+    eventType,
+    new: newRow,
+    old: oldRow,
+  } as RealtimePayload;
+}
+
+describe('dispatchRealtimeEvent', () => {
+  it('routes a tiles INSERT to onTile with kind=insert', () => {
+    const { handlers, onTile } = makeHandlers();
+    const payload = mkPayload(
+      'tiles',
+      'INSERT',
+      { id: 't1', shape: 'square', size_in: 3, label: 'Square 3"' },
+      {},
+    );
+    dispatchRealtimeEvent(payload, handlers, new Set());
+    expect(onTile).toHaveBeenCalledTimes(1);
+    expect(onTile).toHaveBeenCalledWith({
+      kind: 'insert',
+      row: { id: 't1', shape: 'square', size_in: 3, label: 'Square 3"' },
+      oldRow: undefined,
+    });
+  });
+
+  it('routes a surfaces UPDATE to onSurface with kind=update and oldRow populated', () => {
+    const { handlers, onSurface } = makeHandlers();
+    const newRow = { id: 'main', width_in: 130 };
+    const oldRow = { id: 'main', width_in: 120 };
+    dispatchRealtimeEvent(
+      mkPayload('surfaces', 'UPDATE', newRow, oldRow),
+      handlers,
+      new Set(),
+    );
+    expect(onSurface).toHaveBeenCalledWith({
+      kind: 'update',
+      row: newRow,
+      oldRow,
+    });
+  });
+
+  it('routes a painted_cells DELETE to onPaintedCell with row=oldRow', () => {
+    const { handlers, onPaintedCell } = makeHandlers();
+    const oldRow = { surface_id: 'main', cell_key: '3,5', color: '#abc' };
+    dispatchRealtimeEvent(
+      mkPayload('painted_cells', 'DELETE', {}, oldRow),
+      handlers,
+      new Set(),
+    );
+    expect(onPaintedCell).toHaveBeenCalledWith({
+      kind: 'delete',
+      row: oldRow,
+      oldRow,
+    });
+  });
+
+  it('routes a project_settings UPDATE to onSettings as {row}', () => {
+    const { handlers, onSettings, onTile } = makeHandlers();
+    const newRow = { id: 1, ceil_ft: 9, palette: [], selected_color: '#fff' };
+    dispatchRealtimeEvent(
+      mkPayload('project_settings', 'UPDATE', newRow, { id: 1, ceil_ft: 8 }),
+      handlers,
+      new Set(),
+    );
+    expect(onSettings).toHaveBeenCalledWith({ row: newRow });
+    expect(onTile).not.toHaveBeenCalled();
+  });
+
+  it('routes a versions INSERT to onVersion', () => {
+    const { handlers, onVersion } = makeHandlers();
+    const newRow = { id: 'v1', label: 'snap' };
+    dispatchRealtimeEvent(
+      mkPayload('versions', 'INSERT', newRow, {}),
+      handlers,
+      new Set(),
+    );
+    expect(onVersion).toHaveBeenCalledWith({
+      kind: 'insert',
+      row: newRow,
+      oldRow: undefined,
+    });
+  });
+
+  it('suppresses and removes a matching pending key for painted_cell insert', () => {
+    const { handlers, onPaintedCell } = makeHandlers();
+    const pendingKeys = new Set<string>(['painted_cell:main:3,5:#abc']);
+    const newRow = { surface_id: 'main', cell_key: '3,5', color: '#abc' };
+    dispatchRealtimeEvent(
+      mkPayload('painted_cells', 'INSERT', newRow, {}),
+      handlers,
+      pendingKeys,
+    );
+    expect(onPaintedCell).not.toHaveBeenCalled();
+    expect(pendingKeys.has('painted_cell:main:3,5:#abc')).toBe(false);
+  });
+
+  it('suppresses a matching pending key for painted_cell delete (color-less key)', () => {
+    const { handlers, onPaintedCell } = makeHandlers();
+    const pendingKeys = new Set<string>(['painted_cell:main:3,5']);
+    const oldRow = { surface_id: 'main', cell_key: '3,5', color: '#abc' };
+    dispatchRealtimeEvent(
+      mkPayload('painted_cells', 'DELETE', {}, oldRow),
+      handlers,
+      pendingKeys,
+    );
+    expect(onPaintedCell).not.toHaveBeenCalled();
+    expect(pendingKeys.has('painted_cell:main:3,5')).toBe(false);
+  });
+
+  it('still dispatches when pending key is for a different change', () => {
+    const { handlers, onPaintedCell } = makeHandlers();
+    const pendingKeys = new Set<string>(['painted_cell:main:0,0:#000']);
+    const newRow = { surface_id: 'main', cell_key: '3,5', color: '#abc' };
+    dispatchRealtimeEvent(
+      mkPayload('painted_cells', 'INSERT', newRow, {}),
+      handlers,
+      pendingKeys,
+    );
+    expect(onPaintedCell).toHaveBeenCalledTimes(1);
+    // Untouched pending key remains.
+    expect(pendingKeys.has('painted_cell:main:0,0:#000')).toBe(true);
+  });
+
+  it('computes tile:<id> pending key for tile events', () => {
+    const { handlers, onTile } = makeHandlers();
+    const pendingKeys = new Set<string>(['tile:t1']);
+    dispatchRealtimeEvent(
+      mkPayload('tiles', 'UPDATE', { id: 't1', label: 'Renamed' }, { id: 't1', label: 'Old' }),
+      handlers,
+      pendingKeys,
+    );
+    expect(onTile).not.toHaveBeenCalled();
+    expect(pendingKeys.has('tile:t1')).toBe(false);
+  });
+
+  it('computes tile:<id> pending key from oldRow on tile DELETE', () => {
+    const { handlers, onTile } = makeHandlers();
+    const pendingKeys = new Set<string>(['tile:t1']);
+    dispatchRealtimeEvent(
+      mkPayload('tiles', 'DELETE', {}, { id: 't1' }),
+      handlers,
+      pendingKeys,
+    );
+    expect(onTile).not.toHaveBeenCalled();
+    expect(pendingKeys.has('tile:t1')).toBe(false);
+  });
+
+  it('computes surface:<id> pending key for surface events', () => {
+    const { handlers, onSurface } = makeHandlers();
+    const pendingKeys = new Set<string>(['surface:main']);
+    dispatchRealtimeEvent(
+      mkPayload('surfaces', 'UPDATE', { id: 'main', width_in: 150 }, { id: 'main', width_in: 130 }),
+      handlers,
+      pendingKeys,
+    );
+    expect(onSurface).not.toHaveBeenCalled();
+    expect(pendingKeys.has('surface:main')).toBe(false);
+  });
+
+  it('computes settings:1 pending key for project_settings', () => {
+    const { handlers, onSettings } = makeHandlers();
+    const pendingKeys = new Set<string>(['settings:1']);
+    dispatchRealtimeEvent(
+      mkPayload('project_settings', 'UPDATE', { id: 1, ceil_ft: 9 }, { id: 1, ceil_ft: 8 }),
+      handlers,
+      pendingKeys,
+    );
+    expect(onSettings).not.toHaveBeenCalled();
+    expect(pendingKeys.has('settings:1')).toBe(false);
+  });
+
+  it('computes version:<id> pending key for version events', () => {
+    const { handlers, onVersion } = makeHandlers();
+    const pendingKeys = new Set<string>(['version:v1']);
+    dispatchRealtimeEvent(
+      mkPayload('versions', 'DELETE', {}, { id: 'v1' }),
+      handlers,
+      pendingKeys,
+    );
+    expect(onVersion).not.toHaveBeenCalled();
+    expect(pendingKeys.has('version:v1')).toBe(false);
+  });
+
+  it('is a no-op for an unknown table (never throws, never dispatches)', () => {
+    const { handlers, onTile, onSurface, onPaintedCell, onSettings, onVersion } =
+      makeHandlers();
+    dispatchRealtimeEvent(
+      mkPayload('unknown_table', 'INSERT', { id: 'x' }, {}),
+      handlers,
+      new Set(),
+    );
+    expect(onTile).not.toHaveBeenCalled();
+    expect(onSurface).not.toHaveBeenCalled();
+    expect(onPaintedCell).not.toHaveBeenCalled();
+    expect(onSettings).not.toHaveBeenCalled();
+    expect(onVersion).not.toHaveBeenCalled();
+  });
+});
+
+describe('subscribeAll', () => {
+  it('registers one .on() per table, calls .subscribe(), and returns an unsubscribe that removes the channel', () => {
+    const onCalls: Array<{
+      type: string;
+      filter: { event: string; schema: string; table: string };
+    }> = [];
+    const subscribe = vi.fn();
+    const chain: Record<string, unknown> = {};
+    chain['on'] = vi.fn(
+      (
+        type: string,
+        filter: { event: string; schema: string; table: string },
+        _cb: unknown,
+      ) => {
+        onCalls.push({ type, filter });
+        return chain;
+      },
+    );
+    chain['subscribe'] = subscribe;
+    const removeChannel = vi.fn();
+    const client = {
+      channel: vi.fn(() => chain),
+      removeChannel,
+    } as unknown as Parameters<typeof subscribeAll>[0];
+
+    const handlers: ChangeHandlers = {
+      onTile: vi.fn(),
+      onSurface: vi.fn(),
+      onPaintedCell: vi.fn(),
+      onSettings: vi.fn(),
+      onVersion: vi.fn(),
+    };
+
+    const unsubscribe = subscribeAll(client, handlers, new Set());
+
+    // Channel opened with the agreed name.
+    expect((client as unknown as { channel: ReturnType<typeof vi.fn> }).channel)
+      .toHaveBeenCalledWith('bathroom-tiles');
+    // One .on() per table.
+    expect(onCalls.map((c) => c.filter.table).sort()).toEqual(
+      ['painted_cells', 'project_settings', 'surfaces', 'tiles', 'versions'].sort(),
+    );
+    for (const c of onCalls) {
+      expect(c.type).toBe('postgres_changes');
+      expect(c.filter.event).toBe('*');
+      expect(c.filter.schema).toBe('public');
+    }
+    // Exactly one .subscribe() at the end.
+    expect(subscribe).toHaveBeenCalledTimes(1);
+    // Unsubscribe calls removeChannel with the channel reference.
+    unsubscribe();
+    expect(removeChannel).toHaveBeenCalledTimes(1);
+    expect(removeChannel).toHaveBeenCalledWith(chain);
+  });
+
+  it('wires per-table callbacks through dispatchRealtimeEvent (painted_cells callback triggers onPaintedCell)', () => {
+    // Capture the callback registered for painted_cells and invoke it directly
+    // to verify the subscribeAll wiring dispatches to handlers correctly.
+    const registered: Record<
+      string,
+      (payload: RealtimePayload) => void
+    > = {};
+    const chain: Record<string, unknown> = {};
+    chain['on'] = vi.fn(
+      (
+        _type: string,
+        filter: { table: string },
+        cb: (payload: RealtimePayload) => void,
+      ) => {
+        registered[filter.table] = cb;
+        return chain;
+      },
+    );
+    chain['subscribe'] = vi.fn();
+    const client = {
+      channel: vi.fn(() => chain),
+      removeChannel: vi.fn(),
+    } as unknown as Parameters<typeof subscribeAll>[0];
+
+    const handlers = makeHandlers();
+    subscribeAll(client, handlers.handlers, new Set());
+
+    const cb = registered['painted_cells'];
+    expect(cb).toBeDefined();
+    cb!(
+      mkPayload(
+        'painted_cells',
+        'INSERT',
+        { surface_id: 'main', cell_key: '0,0', color: '#fff' },
+        {},
+      ),
+    );
+    expect(handlers.onPaintedCell).toHaveBeenCalledWith({
+      kind: 'insert',
+      row: { surface_id: 'main', cell_key: '0,0', color: '#fff' },
+      oldRow: undefined,
+    });
   });
 });
