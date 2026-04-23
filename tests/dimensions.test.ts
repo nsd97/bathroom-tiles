@@ -25,6 +25,14 @@ describe('parseDim', () => {
     expect(parseDim('')).toBeNaN();
     expect(parseDim(null)).toBeNaN();
   });
+  it('treats whitespace-only and undefined as NaN', () => {
+    expect(parseDim('   ')).toBeNaN();
+    expect(parseDim(undefined)).toBeNaN();
+  });
+
+  it('coerces number inputs via String()', () => {
+    expect(parseDim(170)).toBe(170);
+  });
 });
 
 describe('formatDim', () => {
@@ -36,6 +44,16 @@ describe('formatDim', () => {
   });
   it('formats pure inches when < 1 ft', () => {
     expect(formatDim(7.87)).toBe('7.87"');
+  });
+  it('formats integer inches without trailing zeros', () => {
+    expect(formatDim(5)).toBe('5"');
+    expect(formatDim(0)).toBe('0"');
+  });
+
+  it('round-trips with parseDim for representative values', () => {
+    expect(parseDim(formatDim(170))).toBe(170);
+    expect(parseDim(formatDim(168))).toBe(168);
+    expect(parseDim(formatDim(7.87))).toBe(7.87);
   });
   it('returns empty string for NaN / null', () => {
     expect(formatDim(NaN)).toBe('');
