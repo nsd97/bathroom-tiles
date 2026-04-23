@@ -670,6 +670,15 @@ async function mountApp(root: HTMLElement, currentUserId: string | null): Promis
     rerenderCounts();
   });
 
+  // Sign-out — `onAuthStateChange` (set up in boot) handles the rerender, so
+  // we only need to kick off the API call. Error path: log and keep the app
+  // mounted so the user can retry.
+  refs.signOutBtn.addEventListener('click', () => {
+    void supabase.auth.signOut().then(({ error }) => {
+      if (error) console.warn('[signOut]', error);
+    });
+  });
+
   wireToolButtons(refs.toolButtons, state);
 
   // View toggle — UI-local pref, no server sync.

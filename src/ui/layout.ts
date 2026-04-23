@@ -11,14 +11,18 @@ export interface LayoutRefs {
   viewToggleButtons: HTMLButtonElement[];
   canvas2d: HTMLElement;
   canvas3d: HTMLElement;
+  signOutBtn: HTMLButtonElement;
 }
 
 export function mountLayout(root: HTMLElement): LayoutRefs {
   root.innerHTML = `
     <aside>
-      <div>
-        <h1>Tile Planner</h1>
-        <div class="sub">7.87\u2033 \u00d7 7.87\u2033 tiles \u00b7 bathroom</div>
+      <div class="sidebar-header">
+        <div>
+          <h1>Tile Planner</h1>
+          <div class="sub">7.87\u2033 \u00d7 7.87\u2033 tiles \u00b7 bathroom</div>
+        </div>
+        <button type="button" class="signout-btn" id="signout">Sign out</button>
       </div>
       <section>
         <h2>Room</h2>
@@ -88,5 +92,6 @@ export function mountLayout(root: HTMLElement): LayoutRefs {
     viewToggleButtons: Array.from(root.querySelectorAll<HTMLButtonElement>('#view-toggle button')),
     canvas2d: q('#canvas'),
     canvas3d: q('#canvas-3d'),
+    signOutBtn: q<HTMLButtonElement>('#signout'),
   };
 }
