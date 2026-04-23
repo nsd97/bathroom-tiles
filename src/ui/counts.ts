@@ -9,7 +9,7 @@ export interface CountsRefs {
 }
 
 export function renderCounts(refs: CountsRefs, state: State): void {
-  const totals = computeTotals(state.surfaces, state.tiles);
+  const totals = computeTotals(state.surfaces, state.tiles, state.tileLibrary);
   refs.countsEl.innerHTML = '';
   if (totals.byColor.size === 0) {
     const d = document.createElement('div');

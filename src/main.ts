@@ -552,11 +552,20 @@ function applyPaintedCellChange(
     mapBySurface.set(key, row.color);
   }
   // Targeted DOM update — avoid a full canvas rerender for a single-cell change.
-  const [rStr, cStr] = key.split(',');
-  const el = canvas.querySelector<HTMLElement>(
-    `.tile[data-surface-id="${surfaceId}"][data-r="${rStr}"][data-c="${cStr}"]`,
+  // Matches both square `.tile` divs and hex <polygon> elements, which both
+  // carry `data-surface-id` + `data-cell-key`.
+  const esc = (s: string): string =>
+    typeof CSS !== 'undefined' && typeof CSS.escape === 'function' ? CSS.escape(s) : s;
+  const el = canvas.querySelector<HTMLElement | SVGElement>(
+    `[data-surface-id="${esc(surfaceId)}"][data-cell-key="${esc(key)}"]`,
   );
-  if (el) el.style.background = change.kind === 'delete' ? '' : row.color;
+  if (el) {
+    if (el instanceof SVGElement) {
+      el.setAttribute('fill', change.kind === 'delete' ? 'white' : row.color);
+    } else {
+      el.style.background = change.kind === 'delete' ? '' : row.color;
+    }
+  }
   rerenderCounts();
 }
 

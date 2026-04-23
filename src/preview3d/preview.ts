@@ -1,8 +1,13 @@
-import { getGrid, cellKey, TILE_PX, TILE_INCH } from '@/core/grid';
+import { getGrid, cellKey, PX_PER_INCH } from '@/core/grid';
 import type { State, Surface } from '@/core/state';
 
 const PX_PER_INCH_3D = 3;
-const TILE_PX_3D = TILE_INCH * PX_PER_INCH_3D;
+// Historical default: 7.87" squares. Phase 7 will extend the 3D preview to
+// match per-surface tile shape/size; this path is still square-only and is
+// currently feature-flagged off in main.ts.
+const DEFAULT_TILE_INCH = 7.87;
+const DEFAULT_TILE_PX_2D = DEFAULT_TILE_INCH * PX_PER_INCH;
+const TILE_PX_3D = DEFAULT_TILE_INCH * PX_PER_INCH_3D;
 const ORBIT_AC_KEY = '__orbitAC__';
 
 interface ContainerWithAC extends HTMLElement {
@@ -60,9 +65,9 @@ export function render3D(container: HTMLElement, state: State, onChange: () => v
     grid.style.width = wPx + 'px';
     grid.style.height = hPx + 'px';
 
-    const g = getGrid(s);
-    const colSizes3d = g.colSizes.map(v => (v / TILE_PX) * TILE_PX_3D);
-    const rowSizes3d = g.rowSizes.map(v => (v / TILE_PX) * TILE_PX_3D);
+    const g = getGrid(s, DEFAULT_TILE_INCH);
+    const colSizes3d = g.colSizes.map(v => (v / DEFAULT_TILE_PX_2D) * TILE_PX_3D);
+    const rowSizes3d = g.rowSizes.map(v => (v / DEFAULT_TILE_PX_2D) * TILE_PX_3D);
     grid.style.gridTemplateColumns = colSizes3d.map(v => v.toFixed(2) + 'px').join(' ');
     grid.style.gridTemplateRows = rowSizes3d.map(v => v.toFixed(2) + 'px').join(' ');
 

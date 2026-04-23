@@ -4,6 +4,7 @@ import { parseDim, formatDim } from '@/core/dimensions';
 import type { State, Surface } from '@/core/state';
 import { effectiveTool } from './tools';
 import { SHAPE_GLYPHS } from './tile-library';
+import { renderHexSurface } from './hex-surface';
 
 export interface SurfaceCallbacks {
   onRerenderCounts: () => void;
@@ -70,8 +71,7 @@ export function renderCanvas(canvas: HTMLElement, state: State, cb: SurfaceCallb
 }
 
 function renderSurface(s: Surface, state: State, canvas: HTMLElement, cb: SurfaceCallbacks): HTMLElement {
-  const stats = computeSurfaceStats(s);
-  const { grid } = stats;
+  const tile = state.tileLibrary.find((t) => t.id === s.tileId);
 
   const surf = document.createElement('div');
   surf.className = 'surface';
@@ -95,7 +95,6 @@ function renderSurface(s: Surface, state: State, canvas: HTMLElement, cb: Surfac
 
   // Tile chip: text-only "Tile: <glyph> <label>". Looks up from state.tileLibrary
   // so that a tile rename or swap is reflected here on next rerender.
-  const tile = state.tileLibrary.find((t) => t.id === s.tileId);
   const chip = document.createElement('div');
   chip.className = 'tile-chip';
   if (tile) {
@@ -107,10 +106,17 @@ function renderSurface(s: Surface, state: State, canvas: HTMLElement, cb: Surfac
 
   const meta = document.createElement('div');
   meta.className = 'surface-meta';
-  const countStr = stats.cut
-    ? `${stats.full} full + ${stats.cut} cut = ${stats.total}`
-    : `${stats.full} tiles`;
-  meta.textContent = `${countStr} \u00b7 ${stats.areaFt2.toFixed(1)} ft\u00b2 \u00b7 ${s.note ?? ''}`;
+  // Meta defaults to the bare area if no tile is assigned.
+  if (tile) {
+    const stats = computeSurfaceStats(s, tile);
+    const countStr = stats.cut
+      ? `${stats.full} full + ${stats.cut} cut = ${stats.total}`
+      : `${stats.full} tiles`;
+    meta.textContent = `${countStr} \u00b7 ${stats.areaFt2.toFixed(1)} ft\u00b2 \u00b7 ${s.note ?? ''}`;
+  } else {
+    const areaFt2 = (s.widthIn * s.heightIn) / 144;
+    meta.textContent = `\u2014 \u00b7 ${areaFt2.toFixed(1)} ft\u00b2 \u00b7 ${s.note ?? ''}`;
+  }
   head.appendChild(meta);
 
   const dimRow = document.createElement('div');
@@ -143,11 +149,21 @@ function renderSurface(s: Surface, state: State, canvas: HTMLElement, cb: Surfac
   head.appendChild(dimRow);
 
   surf.appendChild(head);
-  surf.appendChild(buildGridElement(s, grid, state));
+  if (!tile || tile.shape === 'square') {
+    // Square path (or surface with no tile assigned → render a default 7.87"
+    // grid so the surface is still visible).
+    const sizeIn = tile?.sizeIn ?? 7.87;
+    surf.appendChild(buildSquareGridElement(s, state, sizeIn));
+  } else {
+    // Narrowed to hex-pointy | hex-flat by the branch above; passed through
+    // the HexTile alias declared in hex-surface.ts.
+    surf.appendChild(renderHexSurface(s, { ...tile, shape: tile.shape }, state));
+  }
   return surf;
 }
 
-function buildGridElement(s: Surface, grid: ReturnType<typeof getGrid>, state: State): HTMLElement {
+function buildSquareGridElement(s: Surface, state: State, tileSizeIn: number): HTMLElement {
+  const grid = getGrid(s, tileSizeIn);
   const gridEl = document.createElement('div');
   gridEl.className = 'grid';
   gridEl.dataset.surfaceId = s.id;
@@ -160,6 +176,7 @@ function buildGridElement(s: Surface, grid: ReturnType<typeof getGrid>, state: S
       t.className = 'tile';
       if (isCutCell(grid, r, c)) t.classList.add('cut');
       t.dataset.surfaceId = s.id;
+      t.dataset.cellKey = cellKey(r, c);
       t.dataset.r = String(r);
       t.dataset.c = String(c);
       const color = tilesMap.get(cellKey(r, c));
@@ -181,30 +198,62 @@ function rerenderSurface(surfaceId: string, state: State, canvas: HTMLElement, c
   else cb.persist();
 }
 
-interface TileTarget { surfaceId: string; r: number; c: number; }
+// --- Painting -----------------------------------------------------------------
 
-function tileFromEvent(e: Event): TileTarget | null {
+interface PaintTarget { surfaceId: string; key: string; }
+
+/**
+ * Resolve a mouse event to a paint target. Square tiles carry
+ * `data-cell-key="r,c"`; hex polygons carry `data-cell-key="q,r"`. The
+ * downstream apply() treats the key as opaque so both shapes share the code
+ * path.
+ */
+function targetFromEvent(e: Event): PaintTarget | null {
   const target = e.target as HTMLElement | null;
-  const el = target?.closest<HTMLElement>('.tile');
+  if (!target) return null;
+  const el = target.closest<Element>('[data-surface-id][data-cell-key]');
   if (!el) return null;
-  const surfaceId = el.dataset.surfaceId;
-  const rStr = el.dataset.r;
-  const cStr = el.dataset.c;
-  if (!surfaceId || !rStr || !cStr) return null;
-  const r = Number(rStr);
-  const c = Number(cStr);
-  if (!Number.isFinite(r) || !Number.isFinite(c)) return null;
-  return { surfaceId, r, c };
+  const surfaceId = (el as HTMLElement | SVGElement).dataset?.surfaceId
+    ?? el.getAttribute('data-surface-id');
+  const key = (el as HTMLElement | SVGElement).dataset?.cellKey
+    ?? el.getAttribute('data-cell-key');
+  if (!surfaceId || !key) return null;
+  return { surfaceId, key };
 }
 
-function setTile(state: State, canvas: HTMLElement, surfaceId: string, r: number, c: number, color: string | null): void {
-  const map = state.tiles[surfaceId] ?? (state.tiles[surfaceId] = new Map());
-  if (color == null) map.delete(cellKey(r, c));
-  else map.set(cellKey(r, c), color);
-  const el = canvas.querySelector<HTMLElement>(
-    `.tile[data-surface-id="${surfaceId}"][data-r="${r}"][data-c="${c}"]`,
+function paintCellInDOM(
+  canvas: HTMLElement,
+  surfaceId: string,
+  key: string,
+  color: string | null,
+): void {
+  // Matches the .tile div (square) or the <polygon> (hex). Both carry
+  // data-surface-id + data-cell-key.
+  const esc = (s: string): string =>
+    typeof CSS !== 'undefined' && typeof CSS.escape === 'function' ? CSS.escape(s) : s;
+  const el = canvas.querySelector<HTMLElement | SVGElement>(
+    `[data-surface-id="${esc(surfaceId)}"][data-cell-key="${esc(key)}"]`,
   );
-  if (el) el.style.background = color ?? '';
+  if (!el) return;
+  if (el instanceof SVGElement) {
+    // Hex polygons: toggle the fill attribute.
+    el.setAttribute('fill', color ?? 'white');
+  } else {
+    el.style.background = color ?? '';
+  }
+}
+
+function setCell(
+  state: State,
+  canvas: HTMLElement,
+  surfaceId: string,
+  key: string,
+  color: string | null,
+): void {
+  const map = state.tiles[surfaceId] ?? (state.tiles[surfaceId] = new Map());
+  if (color == null) map.delete(key);
+  else map.set(key, color);
+  paintCellInDOM(canvas, surfaceId, key, color);
 }
 
 interface Stroke {
@@ -223,7 +272,6 @@ function emptyStroke(): Stroke {
  */
 function recordStroke(stroke: Stroke, surfaceId: string, key: string, color: string | null): void {
   if (color == null) {
-    // Erase wins; remove any pending paint for this cell, record erase.
     stroke.paints.get(surfaceId)?.delete(key);
     let set = stroke.erases.get(surfaceId);
     if (!set) { set = new Set(); stroke.erases.set(surfaceId, set); }
@@ -239,23 +287,22 @@ function recordStroke(stroke: Stroke, surfaceId: string, key: string, color: str
 function apply(
   state: State,
   canvas: HTMLElement,
-  target: TileTarget | null,
+  target: PaintTarget | null,
   e: MouseEvent,
   cb: SurfaceCallbacks,
   stroke: Stroke,
 ): void {
   if (!target) return;
   const tool = effectiveTool(state, e);
-  const key = cellKey(target.r, target.c);
   if (tool === 'paint') {
-    setTile(state, canvas, target.surfaceId, target.r, target.c, state.selectedColor);
-    recordStroke(stroke, target.surfaceId, key, state.selectedColor);
+    setCell(state, canvas, target.surfaceId, target.key, state.selectedColor);
+    recordStroke(stroke, target.surfaceId, target.key, state.selectedColor);
   } else if (tool === 'erase') {
-    setTile(state, canvas, target.surfaceId, target.r, target.c, null);
-    recordStroke(stroke, target.surfaceId, key, null);
+    setCell(state, canvas, target.surfaceId, target.key, null);
+    recordStroke(stroke, target.surfaceId, target.key, null);
   } else {
     const map = state.tiles[target.surfaceId];
-    const c = map?.get(key);
+    const c = map?.get(target.key);
     if (c) {
       state.selectedColor = c;
       if (!state.palette.includes(c)) state.palette.push(c);
@@ -272,7 +319,7 @@ export function wireCanvasPainting(canvas: HTMLElement, state: State, cb: Surfac
     const target = e.target as HTMLElement | null;
     if (target?.closest('input')) return;
     e.preventDefault();
-    const t = tileFromEvent(e);
+    const t = targetFromEvent(e);
     if (!t) return;
     if (cb.onFocusSurface) cb.onFocusSurface(t.surfaceId);
     painting = true;
@@ -282,7 +329,7 @@ export function wireCanvasPainting(canvas: HTMLElement, state: State, cb: Surfac
   });
   canvas.addEventListener('mouseover', (e) => {
     if (!painting) return;
-    const t = tileFromEvent(e);
+    const t = targetFromEvent(e);
     if (!t) return;
     apply(state, canvas, t, e, cb, stroke);
   });
@@ -291,8 +338,6 @@ export function wireCanvasPainting(canvas: HTMLElement, state: State, cb: Surfac
     painting = false;
     cb.onRerenderCounts();
     if (cb.onStrokeCommit) {
-      // Only fire when the stroke actually touched cells (eyedrop-only strokes
-      // produce empty maps and need no network traffic).
       if (stroke.paints.size > 0 || stroke.erases.size > 0) {
         cb.onStrokeCommit(stroke.paints, stroke.erases);
       }
@@ -303,3 +348,4 @@ export function wireCanvasPainting(canvas: HTMLElement, state: State, cb: Surfac
   });
   canvas.addEventListener('contextmenu', (e) => e.preventDefault());
 }
+

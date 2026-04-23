@@ -177,6 +177,20 @@
     );
     pointer-events: none;
   }
+  svg.hex-grid {
+    display: block;
+    background: var(--grout);
+    border-radius: 2px;
+    user-select: none;
+  }
+  svg.hex-grid polygon {
+    cursor: crosshair;
+    transition: fill .05s ease;
+  }
+  svg.hex-grid polygon:hover {
+    stroke: var(--accent);
+    stroke-width: 1.5;
+  }
 
   .view-toggle {
     display: inline-flex;
