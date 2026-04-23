@@ -10,7 +10,7 @@
 
 **Design doc:** `docs/plans/2026-04-23-tile-library-and-supabase-design.md` — read it for context on *why* decisions were made.
 
-**Critical rule — use context7 heavily.** Before writing any code that calls Supabase SDK APIs (auth, realtime, RLS patterns), query context7 via `mcp__context7__resolve-library-id` + `mcp__context7__query-docs` for `/supabase/supabase-js`, `/supabase/supabase`, `/supabase/cli`. Do not write SDK calls from memory. User explicit requirement.
+**Critical rule — use context7 before writing ANY code.** This rule is NOT limited to Supabase. Before writing a snippet, test, migration, CLI invocation, or any other code, identify the libraries / frameworks / APIs / CLIs involved and query context7 via `mcp__context7__resolve-library-id` + `mcp__context7__query-docs` for each. Examples that require a query during this plan's execution: Supabase JS SDK (auth, realtime, PostgREST), Supabase CLI, Vitest (matchers, `vi.fn()`, module mocking), Vite env typing, TypeScript strict-mode behavior, any Node/browser API whose shape could be stale. Counter-examples (no query): pure TypeScript syntax, this project's own internal modules. Do not write from memory — even for APIs you "know." This is a hard user requirement; ignoring it has already caused one plan-level bug (see commit `ce6900f`).
 
 **Context7 library IDs verified for this plan (2026-04-23):**
 - `/supabase/supabase-js` (v2.58.0) — client SDK including `auth.signInWithOtp`, `auth.onAuthStateChange`, `from().upsert()`, `channel().on('postgres_changes', ...).subscribe()`
