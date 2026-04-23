@@ -22,8 +22,9 @@ export function renderSwatches(root: HTMLElement, state: State, handlers: Swatch
     rm.addEventListener('click', (e) => {
       e.stopPropagation();
       if (state.palette.length <= 1) return;
-      state.palette = state.palette.filter(c => c !== color);
-      if (state.selectedColor === color) state.selectedColor = state.palette[0]!;
+      const next = state.palette.filter(c => c !== color);
+      state.palette = next;
+      if (state.selectedColor === color) state.selectedColor = next[0] ?? color;
       renderSwatches(root, state, handlers);
       handlers.onChange();
     });
