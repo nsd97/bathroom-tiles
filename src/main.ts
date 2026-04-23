@@ -5,7 +5,7 @@ import './styles/preview3d.css';
 
 import { mountLayout } from './ui/layout';
 import { initialState, initTiles, type ViewMode } from './core/state';
-import { loadSaved, persist, applySaved, type SavedShape } from './storage/local';
+import { loadSaved, persist, applySaved, serializeTiles, type SavedShape } from './storage/local';
 import { renderSwatches } from './ui/swatches';
 import { wireToolButtons } from './ui/tools';
 import { renderCanvas, wireCanvasPainting } from './ui/surface';
@@ -57,15 +57,13 @@ refs.ceilInput.addEventListener('change', () => {
 });
 
 refs.saveBtn.addEventListener('click', () => {
-  const tilesOut: Record<string, Record<string, string>> = {};
-  for (const [k, m] of Object.entries(state.tiles)) tilesOut[k] = Object.fromEntries(m);
   const data = {
     version: 2,
     ceilFt: state.ceilFt,
     palette: state.palette,
     selectedColor: state.selectedColor,
     surfaces: state.surfaces.map(s => ({ id: s.id, widthIn: s.widthIn, heightIn: s.heightIn })),
-    tiles: tilesOut,
+    tiles: serializeTiles(state.tiles),
   };
   const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
   const a = document.createElement('a');

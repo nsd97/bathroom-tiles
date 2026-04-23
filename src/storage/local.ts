@@ -23,18 +23,20 @@ export function loadSaved(): SavedShape | null {
   return null;
 }
 
+export function serializeTiles(tiles: State['tiles']): Record<string, Record<string, string>> {
+  const out: Record<string, Record<string, string>> = {};
+  for (const [k, m] of Object.entries(tiles)) out[k] = Object.fromEntries(m);
+  return out;
+}
+
 export function persist(state: State): void {
   try {
-    const tilesOut: Record<string, Record<string, string>> = {};
-    for (const [k, m] of Object.entries(state.tiles)) {
-      tilesOut[k] = Object.fromEntries(m);
-    }
     localStorage.setItem(STORAGE_KEY, JSON.stringify({
       ceilFt: state.ceilFt,
       palette: state.palette,
       selectedColor: state.selectedColor,
       surfaces: state.surfaces.map(s => ({ id: s.id, widthIn: s.widthIn, heightIn: s.heightIn })),
-      tiles: tilesOut,
+      tiles: serializeTiles(state.tiles),
       viewMode: state.viewMode,
       orbit: state.orbit,
     }));

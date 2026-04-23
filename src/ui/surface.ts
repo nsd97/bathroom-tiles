@@ -1,4 +1,4 @@
-import { getGrid, isCutCell, cellKey, TILE_PX } from '@/core/grid';
+import { getGrid, isCutCell, cellKey } from '@/core/grid';
 import { computeSurfaceStats } from '@/core/stats';
 import { parseDim, formatDim } from '@/core/dimensions';
 import type { State, Surface } from '@/core/state';
