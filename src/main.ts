@@ -7,6 +7,7 @@ import './styles/auth.css';
 import { supabase } from './auth/client';
 import { gateStateFor } from './auth/gate';
 import { mountLogin } from './auth/login';
+import { createGateViewController } from './auth/render-lifecycle';
 import { initialState } from './core/state';
 import type { State, Surface, Version } from './core/state';
 import type { Tile } from './core/tile';
@@ -52,18 +53,22 @@ async function boot(): Promise<void> {
   const root = document.getElementById('app');
   if (!root) throw new Error('missing #app');
 
+  const views = createGateViewController({
+    mountSignedOut: () => {
+      mountLogin(root, { onSent: () => {} });
+    },
+    mountNotAllowed: () => {
+      root.innerHTML = '<div class="denied">Access denied.</div>';
+    },
+    mountReady: (currentUserId) => mountApp(root, currentUserId),
+  });
+
   const { data: { session } } = await supabase.auth.getSession();
   let state = gateStateFor(session);
   let userId: string | null = session?.user?.id ?? null;
 
   function render(): void {
-    if (state === 'signed-out') {
-      mountLogin(root!, { onSent: () => {} });
-    } else if (state === 'not-allowed') {
-      root!.innerHTML = '<div class="denied">Access denied.</div>';
-    } else if (state === 'ready') {
-      void mountApp(root!, userId);
-    }
+    void views.render(state, userId);
   }
 
   const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, newSession) => {
@@ -74,6 +79,7 @@ async function boot(): Promise<void> {
 
   if (import.meta.hot) {
     import.meta.hot.dispose(() => {
+      views.dispose();
       subscription.unsubscribe();
     });
   }
@@ -81,7 +87,7 @@ async function boot(): Promise<void> {
   render();
 }
 
-async function mountApp(root: HTMLElement, currentUserId: string | null): Promise<void> {
+async function mountApp(root: HTMLElement, currentUserId: string | null): Promise<() => void> {
   // Clear any residual login/denied screen before mounting layout.
   root.innerHTML = '';
   const refs = mountLayout(root);
@@ -702,14 +708,12 @@ async function mountApp(root: HTMLElement, currentUserId: string | null): Promis
 
   rerenderAll();
 
-  if (import.meta.hot) {
-    import.meta.hot.dispose(() => {
-      unsubscribeRealtime();
-      window.removeEventListener('online', onOnline);
-      window.removeEventListener('offline', onOffline);
-      indicator.destroy();
-    });
-  }
+  return () => {
+    unsubscribeRealtime();
+    window.removeEventListener('online', onOnline);
+    window.removeEventListener('offline', onOffline);
+    indicator.destroy();
+  };
 }
 
 // --- Realtime apply-change helpers ------------------------------------------
