@@ -1,25 +1,28 @@
 export interface LayoutRefs {
   ceilInput: HTMLInputElement;
+  versionsEl: HTMLElement;
+  tileLibraryEl: HTMLElement;
   swatchesEl: HTMLElement;
   toolButtons: HTMLButtonElement[];
   countsEl: HTMLElement;
   totalEl: HTMLElement;
   fullCutTotalEl: HTMLElement;
   orderTotalEl: HTMLElement;
-  saveBtn: HTMLButtonElement;
-  loadBtn: HTMLButtonElement;
-  resetBtn: HTMLButtonElement;
   viewToggleButtons: HTMLButtonElement[];
   canvas2d: HTMLElement;
   canvas3d: HTMLElement;
+  signOutBtn: HTMLButtonElement;
 }
 
 export function mountLayout(root: HTMLElement): LayoutRefs {
   root.innerHTML = `
     <aside>
-      <div>
-        <h1>Tile Planner</h1>
-        <div class="sub">7.87\u2033 \u00d7 7.87\u2033 tiles \u00b7 bathroom</div>
+      <div class="sidebar-header">
+        <div>
+          <h1>Tile Planner</h1>
+          <div class="sub">7.87\u2033 \u00d7 7.87\u2033 tiles \u00b7 bathroom</div>
+        </div>
+        <button type="button" class="signout-btn" id="signout">Sign out</button>
       </div>
       <section>
         <h2>Room</h2>
@@ -27,6 +30,14 @@ export function mountLayout(root: HTMLElement): LayoutRefs {
           <label for="ceil">Ceiling height</label>
           <div><input type="number" id="ceil" value="9" step="0.5" min="7" max="14"> <span class="sub">ft</span></div>
         </div>
+      </section>
+      <section>
+        <h2>Versions</h2>
+        <div id="versions"></div>
+      </section>
+      <section>
+        <h2>Tiles</h2>
+        <div id="tile-library"></div>
       </section>
       <section>
         <h2>Palette</h2>
@@ -46,14 +57,6 @@ export function mountLayout(root: HTMLElement): LayoutRefs {
         <div class="count-total"><span>Total</span><span id="total">\u2014</span></div>
         <div class="count-sub"><span>Full \u00b7 cut</span><span id="full-cut-total">\u2014</span></div>
         <div class="count-sub"><span>Order (+10% waste)</span><span id="order-total">\u2014</span></div>
-      </section>
-      <section>
-        <h2>File</h2>
-        <div class="io-row">
-          <button class="io-btn" id="save">Save</button>
-          <button class="io-btn" id="load">Load</button>
-          <button class="io-btn" id="reset">Reset</button>
-        </div>
       </section>
     </aside>
     <main>
@@ -78,17 +81,17 @@ export function mountLayout(root: HTMLElement): LayoutRefs {
 
   return {
     ceilInput: q<HTMLInputElement>('#ceil'),
+    versionsEl: q('#versions'),
+    tileLibraryEl: q('#tile-library'),
     swatchesEl: q('#swatches'),
     toolButtons: Array.from(root.querySelectorAll<HTMLButtonElement>('.tool-btn')),
     countsEl: q('#counts'),
     totalEl: q('#total'),
     fullCutTotalEl: q('#full-cut-total'),
     orderTotalEl: q('#order-total'),
-    saveBtn: q<HTMLButtonElement>('#save'),
-    loadBtn: q<HTMLButtonElement>('#load'),
-    resetBtn: q<HTMLButtonElement>('#reset'),
     viewToggleButtons: Array.from(root.querySelectorAll<HTMLButtonElement>('#view-toggle button')),
     canvas2d: q('#canvas'),
     canvas3d: q('#canvas-3d'),
+    signOutBtn: q<HTMLButtonElement>('#signout'),
   };
 }

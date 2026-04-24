@@ -3,11 +3,45 @@ import { computeSurfaceStats } from '@/core/stats';
 import { parseDim, formatDim } from '@/core/dimensions';
 import type { State, Surface } from '@/core/state';
 import { effectiveTool } from './tools';
+import { SHAPE_GLYPHS } from './tile-library';
+import { renderHexSurface } from './hex-surface';
 
 export interface SurfaceCallbacks {
   onRerenderCounts: () => void;
   onRenderSwatches: () => void;
+  /**
+   * Fallback "something changed, save it" hook. Called from dim-input /
+   * stroke-end code paths when the newer per-action commit hooks below are
+   * NOT supplied. The Supabase-wired app in main.ts passes the newer hooks
+   * and leaves persist as a no-op; older/tests may still use it.
+   */
   persist: () => void;
+  /**
+   * Commit the net result of a drag-paint stroke as a single batch per
+   * surface. Called on mouseup. `paints` maps surfaceId → (cellKey → color);
+   * `erases` maps surfaceId → Set<cellKey>. Wiring this lets the caller push
+   * one round-trip per stroke rather than one per cell. When omitted,
+   * `persist()` is invoked instead.
+   */
+  onStrokeCommit?: (
+    paints: Map<string, Map<string, string>>,
+    erases: Map<string, Set<string>>,
+  ) => void;
+  /**
+   * Fired once per surface whose widthIn/heightIn just changed via the dim
+   * inputs. The Surface object is already mutated in place; the callback
+   * should push the new dims to persistence (and seed any echo key). When
+   * omitted, `persist()` is invoked instead.
+   */
+  onSurfaceDimsCommit?: (surfaceId: string) => void;
+  /**
+   * Fired when a user interacts with a surface — either by clicking its head
+   * or by pressing in its grid. The controller uses this to drive the library
+   * highlight and to scope tile-assignment actions.
+   */
+  onFocusSurface?: (surfaceId: string) => void;
+  /** The currently focused surface id (if any) — used to apply `.focused`. */
+  focusedSurfaceId?: string | null;
 }
 
 export function renderCanvas(canvas: HTMLElement, state: State, cb: SurfaceCallbacks): void {
@@ -37,27 +71,52 @@ export function renderCanvas(canvas: HTMLElement, state: State, cb: SurfaceCallb
 }
 
 function renderSurface(s: Surface, state: State, canvas: HTMLElement, cb: SurfaceCallbacks): HTMLElement {
-  const stats = computeSurfaceStats(s);
-  const { grid } = stats;
+  const tile = state.tileLibrary.find((t) => t.id === s.tileId);
 
   const surf = document.createElement('div');
   surf.className = 'surface';
+  if (cb.focusedSurfaceId === s.id) surf.classList.add('focused');
   surf.dataset.surfaceId = s.id;
 
   const head = document.createElement('div');
   head.className = 'surface-head';
+  if (cb.onFocusSurface) {
+    head.addEventListener('click', (e) => {
+      // Let inputs receive their own events without stealing focus.
+      if ((e.target as HTMLElement | null)?.closest('input,button')) return;
+      cb.onFocusSurface?.(s.id);
+    });
+  }
 
   const nameLine = document.createElement('div');
   nameLine.className = 'surface-name';
   nameLine.textContent = s.name;
   head.appendChild(nameLine);
 
+  // Tile chip: text-only "Tile: <glyph> <label>". Looks up from state.tileLibrary
+  // so that a tile rename or swap is reflected here on next rerender.
+  const chip = document.createElement('div');
+  chip.className = 'tile-chip';
+  if (tile) {
+    chip.textContent = `Tile: ${SHAPE_GLYPHS[tile.shape]} ${tile.label}`;
+  } else {
+    chip.textContent = 'Tile: \u2014';
+  }
+  head.appendChild(chip);
+
   const meta = document.createElement('div');
   meta.className = 'surface-meta';
-  const countStr = stats.cut
-    ? `${stats.full} full + ${stats.cut} cut = ${stats.total}`
-    : `${stats.full} tiles`;
-  meta.textContent = `${countStr} \u00b7 ${stats.areaFt2.toFixed(1)} ft\u00b2 \u00b7 ${s.note ?? ''}`;
+  // Meta defaults to the bare area if no tile is assigned.
+  if (tile) {
+    const stats = computeSurfaceStats(s, tile);
+    const countStr = stats.cut
+      ? `${stats.full} full + ${stats.cut} cut = ${stats.total}`
+      : `${stats.full} tiles`;
+    meta.textContent = `${countStr} \u00b7 ${stats.areaFt2.toFixed(1)} ft\u00b2 \u00b7 ${s.note ?? ''}`;
+  } else {
+    const areaFt2 = (s.widthIn * s.heightIn) / 144;
+    meta.textContent = `\u2014 \u00b7 ${areaFt2.toFixed(1)} ft\u00b2 \u00b7 ${s.note ?? ''}`;
+  }
   head.appendChild(meta);
 
   const dimRow = document.createElement('div');
@@ -90,11 +149,21 @@ function renderSurface(s: Surface, state: State, canvas: HTMLElement, cb: Surfac
   head.appendChild(dimRow);
 
   surf.appendChild(head);
-  surf.appendChild(buildGridElement(s, grid, state));
+  if (!tile || tile.shape === 'square') {
+    // Square path (or surface with no tile assigned → render a default 7.87"
+    // grid so the surface is still visible).
+    const sizeIn = tile?.sizeIn ?? 7.87;
+    surf.appendChild(buildSquareGridElement(s, state, sizeIn));
+  } else {
+    // Narrowed to hex-pointy | hex-flat by the branch above; passed through
+    // the HexTile alias declared in hex-surface.ts.
+    surf.appendChild(renderHexSurface(s, { ...tile, shape: tile.shape }, state));
+  }
   return surf;
 }
 
-function buildGridElement(s: Surface, grid: ReturnType<typeof getGrid>, state: State): HTMLElement {
+function buildSquareGridElement(s: Surface, state: State, tileSizeIn: number): HTMLElement {
+  const grid = getGrid(s, tileSizeIn);
   const gridEl = document.createElement('div');
   gridEl.className = 'grid';
   gridEl.dataset.surfaceId = s.id;
@@ -107,6 +176,7 @@ function buildGridElement(s: Surface, grid: ReturnType<typeof getGrid>, state: S
       t.className = 'tile';
       if (isCutCell(grid, r, c)) t.classList.add('cut');
       t.dataset.surfaceId = s.id;
+      t.dataset.cellKey = cellKey(r, c);
       t.dataset.r = String(r);
       t.dataset.c = String(c);
       const color = tilesMap.get(cellKey(r, c));
@@ -124,43 +194,115 @@ function rerenderSurface(surfaceId: string, state: State, canvas: HTMLElement, c
   const replacement = renderSurface(s, state, canvas, cb);
   if (existing?.parentNode) existing.parentNode.replaceChild(replacement, existing);
   cb.onRerenderCounts();
-  cb.persist();
+  if (cb.onSurfaceDimsCommit) cb.onSurfaceDimsCommit(surfaceId);
+  else cb.persist();
 }
 
-interface TileTarget { surfaceId: string; r: number; c: number; }
+// --- Painting -----------------------------------------------------------------
 
-function tileFromEvent(e: Event): TileTarget | null {
+interface PaintTarget { surfaceId: string; key: string; }
+
+/**
+ * Resolve a mouse event to a paint target. Square tiles carry
+ * `data-cell-key="r,c"`; hex polygons carry `data-cell-key="q,r"`. The
+ * downstream apply() treats the key as opaque so both shapes share the code
+ * path.
+ */
+function targetFromEvent(e: Event): PaintTarget | null {
   const target = e.target as HTMLElement | null;
-  const el = target?.closest<HTMLElement>('.tile');
+  if (!target) return null;
+  const el = target.closest<Element>('[data-surface-id][data-cell-key]');
   if (!el) return null;
-  const surfaceId = el.dataset.surfaceId;
-  const rStr = el.dataset.r;
-  const cStr = el.dataset.c;
-  if (!surfaceId || !rStr || !cStr) return null;
-  const r = Number(rStr);
-  const c = Number(cStr);
-  if (!Number.isFinite(r) || !Number.isFinite(c)) return null;
-  return { surfaceId, r, c };
+  const surfaceId = (el as HTMLElement | SVGElement).dataset?.surfaceId
+    ?? el.getAttribute('data-surface-id');
+  const key = (el as HTMLElement | SVGElement).dataset?.cellKey
+    ?? el.getAttribute('data-cell-key');
+  if (!surfaceId || !key) return null;
+  return { surfaceId, key };
 }
 
-function setTile(state: State, canvas: HTMLElement, surfaceId: string, r: number, c: number, color: string | null): void {
-  const map = state.tiles[surfaceId] ?? (state.tiles[surfaceId] = new Map());
-  if (color == null) map.delete(cellKey(r, c));
-  else map.set(cellKey(r, c), color);
-  const el = canvas.querySelector<HTMLElement>(
-    `.tile[data-surface-id="${surfaceId}"][data-r="${r}"][data-c="${c}"]`,
+function paintCellInDOM(
+  canvas: HTMLElement,
+  surfaceId: string,
+  key: string,
+  color: string | null,
+): void {
+  // Matches the .tile div (square) or the <polygon> (hex). Both carry
+  // data-surface-id + data-cell-key.
+  const esc = (s: string): string =>
+    typeof CSS !== 'undefined' && typeof CSS.escape === 'function' ? CSS.escape(s) : s;
+  const el = canvas.querySelector<HTMLElement | SVGElement>(
+    `[data-surface-id="${esc(surfaceId)}"][data-cell-key="${esc(key)}"]`,
   );
-  if (el) el.style.background = color ?? '';
+  if (!el) return;
+  if (el instanceof SVGElement) {
+    // Hex polygons: toggle the fill attribute.
+    el.setAttribute('fill', color ?? 'white');
+  } else {
+    el.style.background = color ?? '';
+  }
 }
 
-function apply(state: State, canvas: HTMLElement, target: TileTarget | null, e: MouseEvent, cb: SurfaceCallbacks): void {
+function setCell(
+  state: State,
+  canvas: HTMLElement,
+  surfaceId: string,
+  key: string,
+  color: string | null,
+): void {
+  const map = state.tiles[surfaceId] ?? (state.tiles[surfaceId] = new Map());
+  if (color == null) map.delete(key);
+  else map.set(key, color);
+  paintCellInDOM(canvas, surfaceId, key, color);
+}
+
+interface Stroke {
+  paints: Map<string, Map<string, string>>; // surfaceId -> cellKey -> color
+  erases: Map<string, Set<string>>;         // surfaceId -> Set<cellKey>
+}
+
+function emptyStroke(): Stroke {
+  return { paints: new Map(), erases: new Map() };
+}
+
+/**
+ * Record a net cell change from the active stroke. Later writes within the
+ * same stroke overwrite earlier ones for the same (surface, cell), so the
+ * map reflects the final intent on mouseup.
+ */
+function recordStroke(stroke: Stroke, surfaceId: string, key: string, color: string | null): void {
+  if (color == null) {
+    stroke.paints.get(surfaceId)?.delete(key);
+    let set = stroke.erases.get(surfaceId);
+    if (!set) { set = new Set(); stroke.erases.set(surfaceId, set); }
+    set.add(key);
+  } else {
+    stroke.erases.get(surfaceId)?.delete(key);
+    let m = stroke.paints.get(surfaceId);
+    if (!m) { m = new Map(); stroke.paints.set(surfaceId, m); }
+    m.set(key, color);
+  }
+}
+
+function apply(
+  state: State,
+  canvas: HTMLElement,
+  target: PaintTarget | null,
+  e: MouseEvent,
+  cb: SurfaceCallbacks,
+  stroke: Stroke,
+): void {
   if (!target) return;
   const tool = effectiveTool(state, e);
-  if (tool === 'paint') setTile(state, canvas, target.surfaceId, target.r, target.c, state.selectedColor);
-  else if (tool === 'erase') setTile(state, canvas, target.surfaceId, target.r, target.c, null);
-  else {
+  if (tool === 'paint') {
+    setCell(state, canvas, target.surfaceId, target.key, state.selectedColor);
+    recordStroke(stroke, target.surfaceId, target.key, state.selectedColor);
+  } else if (tool === 'erase') {
+    setCell(state, canvas, target.surfaceId, target.key, null);
+    recordStroke(stroke, target.surfaceId, target.key, null);
+  } else {
     const map = state.tiles[target.surfaceId];
-    const c = map?.get(cellKey(target.r, target.c));
+    const c = map?.get(target.key);
     if (c) {
       state.selectedColor = c;
       if (!state.palette.includes(c)) state.palette.push(c);
@@ -171,29 +313,39 @@ function apply(state: State, canvas: HTMLElement, target: TileTarget | null, e: 
 
 export function wireCanvasPainting(canvas: HTMLElement, state: State, cb: SurfaceCallbacks): void {
   let painting = false;
+  let stroke: Stroke = emptyStroke();
   canvas.addEventListener('mousedown', (e) => {
     if (e.button !== 0) return;
     const target = e.target as HTMLElement | null;
     if (target?.closest('input')) return;
     e.preventDefault();
-    const t = tileFromEvent(e);
+    const t = targetFromEvent(e);
     if (!t) return;
+    if (cb.onFocusSurface) cb.onFocusSurface(t.surfaceId);
     painting = true;
-    apply(state, canvas, t, e, cb);
+    stroke = emptyStroke();
+    apply(state, canvas, t, e, cb, stroke);
     cb.onRerenderCounts();
   });
   canvas.addEventListener('mouseover', (e) => {
     if (!painting) return;
-    const t = tileFromEvent(e);
+    const t = targetFromEvent(e);
     if (!t) return;
-    apply(state, canvas, t, e, cb);
+    apply(state, canvas, t, e, cb, stroke);
   });
   window.addEventListener('mouseup', () => {
-    if (painting) {
-      painting = false;
-      cb.onRerenderCounts();
+    if (!painting) return;
+    painting = false;
+    cb.onRerenderCounts();
+    if (cb.onStrokeCommit) {
+      if (stroke.paints.size > 0 || stroke.erases.size > 0) {
+        cb.onStrokeCommit(stroke.paints, stroke.erases);
+      }
+    } else {
       cb.persist();
     }
+    stroke = emptyStroke();
   });
   canvas.addEventListener('contextmenu', (e) => e.preventDefault());
 }
+
